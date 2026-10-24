@@ -19,7 +19,11 @@ int main() {
     using namespace desk;
     int argc=0;LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(argv&&argc==6&&!wcscmp(argv[1],L"/visibility-watch")) {
-        const int result=testing::RunVisibilityWatcherAt(wcstoul(argv[2],nullptr,10),argv[3],argv[4],argv[5]);LocalFree(argv);return result;
+        const int result=testing::RunVisibilityWatcherAt(wcstoul(argv[2],nullptr,10),argv[3],argv[4],argv[5]);
+        // Signal only after recovery has flushed both journals and released
+        // its locks. Restored attributes alone do not mean writes are done.
+        if(!result)Write(std::wstring(argv[3])+L"\\watcher-complete.txt");
+        LocalFree(argv);return result?result:failures?1:0;
     }
     if(argv&&argc==6&&!wcscmp(argv[1],L"/abrupt-fixture")) {
         const bool ok=testing::InitializeHiddenItemsAt(argv[2],argv[3],argv[4])&&HideDesktopItem(argv[5])==DesktopManageResult::Managed&&testing::StartHiddenItemsWatcherAt();
@@ -96,10 +100,13 @@ int main() {
     STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
     const bool launched=CreateProcessW(executable.c_str(),&command[0],nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process)!=FALSE;
     Check(launched,"launch isolated abrupt-exit fixture with separate recovery process");
+    const auto watcherComplete=data+L"\\watcher-complete.txt";
     if(launched){CloseHandle(process.hThread);const DWORD wait=WaitForSingleObject(process.hProcess,15000);DWORD exit=0;GetExitCodeProcess(process.hProcess,&exit);CloseHandle(process.hProcess);
         Check(wait==WAIT_OBJECT_0&&exit==77,"fixture exited abruptly only after watcher readiness handshake");
-        for(int i=0;i<300&&Bits(path)!=0;++i)Sleep(10);
+        for(int i=0;i<300&&!Content(watcherComplete);++i)Sleep(10);
+        Check(Content(watcherComplete),"watcher finished recovery journal writes before fixture cleanup");
         Check(Bits(path)==0&&Content(path),"independent watcher restores original path visibility after abrupt process exit");
+        Check(DeleteFileW(watcherComplete.c_str())!=FALSE,"remove explicit watcher completion marker");
     }
     for(const auto& f:{path,child,outside})Check(DeleteFileW(f.c_str())!=FALSE,"remove explicit isolated file");
     for(const auto* name:{L"hidden-items.dat",L"hidden-items.backup.dat",L"hidden-items.dat.tmp",L"hidden-items.backup.dat.tmp"})DeleteFileW((data+L"\\"+name).c_str());
