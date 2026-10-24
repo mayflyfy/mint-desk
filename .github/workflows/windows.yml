@@ -1,0 +1,38 @@
+name: Windows build and tests
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          location: C:\msys64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: Test native behavior
+        shell: pwsh
+        run: ./tests/run-tests.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe'
+      - name: Build and package
+        shell: pwsh
+        run: ./tools/package-release.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe'
+      - name: Audit source and portable bundle
+        shell: pwsh
+        run: ./tools/audit-release.ps1 -IncludeArtifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MintDesk-windows-x64
+          path: |
+            release/MintDesk.exe
+            release/*-windows-x64.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
