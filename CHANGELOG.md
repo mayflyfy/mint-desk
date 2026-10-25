@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 — 2026-10-25
+
+- Clear item selection when clicking another card or leaving the application.
+- Anchor move/resize gestures to cumulative pointer displacement so snapped cards can move away normally.
+- Show temporary, click-through alignment guides; retain exact keyboard positioning and the Alt override.
+- Preserve custom near-edge positions at startup and on display reflow.
+- Reuse per-user layout and recovery data across upgrades, with regression coverage for saved cards and file order.
+- Create a native desktop shortcut on normal launch; refresh its target after an executable move without duplicates or overwriting unrelated shortcuts.
+- Wait for recovery-journal completion before cleaning up watcher test fixtures.
+
 ## 0.8.0 — 2026-10-24
 
 Initial public release.

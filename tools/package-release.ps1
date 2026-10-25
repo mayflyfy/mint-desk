@@ -17,7 +17,8 @@ $readme=@'
 Copyright (c) 2026 MCC — MIT License
 
 Windows 10 / 11 x64. Portable: extract this folder to a fixed location and run MintDesk.exe.
-首次正常运行自动加入开机启动并注册桌面右键，以后登录 Windows 自动整理。
+首次正常运行自动加入开机启动、注册桌面右键，并创建桌面快捷方式。
+卡片与文件记录保存在当前用户 AppData，更新 EXE 后继续沿用，无需重新拖入。
 托盘菜单可关闭这两项；手动关闭后会保留选择。移动 EXE 后请重新注册路径。
 
 桌面项保持原路径，仅临时设置 Hidden/System 可见性标记；资源管理器中也会隐藏。

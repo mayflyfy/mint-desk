@@ -52,8 +52,10 @@ struct Choice {
     Coordinate delta = 0;
     bool found = false;
     bool screen = false;
+    LONG guide = 0, begin = 0, end = 0;
 
-    void Consider(Coordinate candidate, bool fromScreen, bool feasible = true) {
+    void Consider(Coordinate candidate, bool fromScreen, bool feasible,
+        LONG coordinate, LONG first, LONG last) {
         const Coordinate magnitude = candidate < 0 ? -candidate : candidate;
         if (!feasible || magnitude > distance) return;
         const Coordinate previousMagnitude = delta < 0 ? -delta : delta;
@@ -64,13 +66,30 @@ struct Choice {
             delta = candidate;
             found = true;
             screen = fromScreen;
+            guide = coordinate; begin = first; end = last;
         }
     }
 };
 } // namespace
 
+RECT PointerDragRect(const RECT& initial, POINT start, POINT current, SnapEdge edge) {
+    const bool moving = edge == SnapEdge::Move;
+    const bool left = moving || edge == SnapEdge::Left || edge == SnapEdge::TopLeft || edge == SnapEdge::BottomLeft;
+    const bool right = moving || edge == SnapEdge::Right || edge == SnapEdge::TopRight || edge == SnapEdge::BottomRight;
+    const bool top = moving || edge == SnapEdge::Top || edge == SnapEdge::TopLeft || edge == SnapEdge::TopRight;
+    const bool bottom = moving || edge == SnapEdge::Bottom || edge == SnapEdge::BottomLeft || edge == SnapEdge::BottomRight;
+    const Coordinate dx = Coordinate(current.x) - start.x, dy = Coordinate(current.y) - start.y;
+    const Coordinate l = Coordinate(initial.left) + (left ? dx : 0);
+    const Coordinate r = Coordinate(initial.right) + (right ? dx : 0);
+    const Coordinate t = Coordinate(initial.top) + (top ? dy : 0);
+    const Coordinate b = Coordinate(initial.bottom) + (bottom ? dy : 0);
+    if (!FitsCoordinate(l) || !FitsCoordinate(r) || !FitsCoordinate(t) || !FitsCoordinate(b)) return initial;
+    return {static_cast<LONG>(l), static_cast<LONG>(t), static_cast<LONG>(r), static_cast<LONG>(b)};
+}
+
 RECT SnapRect(const RECT& proposed, SnapEdge edge, const std::vector<RECT>& workAreas,
-    const std::vector<RECT>& peers, const SnapSettings& settings) {
+    const std::vector<RECT>& peers, const SnapSettings& settings, SnapGuides* guides) {
+    if (guides) *guides = {};
     const bool moving = edge == SnapEdge::Move;
     const bool left = edge == SnapEdge::Left || edge == SnapEdge::TopLeft || edge == SnapEdge::BottomLeft;
     const bool right = edge == SnapEdge::Right || edge == SnapEdge::TopRight || edge == SnapEdge::BottomRight;
@@ -93,49 +112,49 @@ RECT SnapRect(const RECT& proposed, SnapEdge edge, const std::vector<RECT>& work
         rect.bottom = static_cast<LONG>(Coordinate(rect.top) + minimumHeight);
 
     Choice x{distance}, y{distance};
-    const auto considerX = [&](Coordinate delta, bool screen) {
+    const auto considerX = [&](Coordinate delta, bool screen, const RECT& target, LONG coordinate) {
         bool feasible = true;
         if (moving) feasible = FitsCoordinate(Coordinate(rect.left) + delta) && FitsCoordinate(Coordinate(rect.right) + delta);
         else if (left) feasible = Coordinate(rect.right) - rect.left - delta >= minimumWidth;
         else if (right) feasible = Coordinate(rect.right) - rect.left + delta >= minimumWidth;
         else return;
-        x.Consider(delta, screen, feasible);
+        x.Consider(delta, screen, feasible, coordinate, target.top, target.bottom);
     };
-    const auto considerY = [&](Coordinate delta, bool screen) {
+    const auto considerY = [&](Coordinate delta, bool screen, const RECT& target, LONG coordinate) {
         bool feasible = true;
         if (moving) feasible = FitsCoordinate(Coordinate(rect.top) + delta) && FitsCoordinate(Coordinate(rect.bottom) + delta);
         else if (top) feasible = Coordinate(rect.bottom) - rect.top - delta >= minimumHeight;
         else if (bottom) feasible = Coordinate(rect.bottom) - rect.top + delta >= minimumHeight;
         else return;
-        y.Consider(delta, screen, feasible);
+        y.Consider(delta, screen, feasible, coordinate, target.left, target.right);
     };
 
     if (const RECT* work = WorkArea(rect, workAreas)) {
-        if (moving || left) considerX(Coordinate(work->left) - rect.left, true);
-        if (moving || right) considerX(Coordinate(work->right) - rect.right, true);
-        if (moving || top) considerY(Coordinate(work->top) - rect.top, true);
-        if (moving || bottom) considerY(Coordinate(work->bottom) - rect.bottom, true);
+        if (moving || left) considerX(Coordinate(work->left) - rect.left, true, *work, work->left);
+        if (moving || right) considerX(Coordinate(work->right) - rect.right, true, *work, work->right);
+        if (moving || top) considerY(Coordinate(work->top) - rect.top, true, *work, work->top);
+        if (moving || bottom) considerY(Coordinate(work->bottom) - rect.bottom, true, *work, work->bottom);
     }
     for (const auto& peer : peers) {
         if (!Valid(peer)) continue;
         if (Gap(rect.top, rect.bottom, peer.top, peer.bottom) <= distance) {
             if (moving || left) {
-                considerX(Coordinate(peer.left) - rect.left, false);
-                considerX(Coordinate(peer.right) - rect.left, false);
+                considerX(Coordinate(peer.left) - rect.left, false, peer, peer.left);
+                considerX(Coordinate(peer.right) - rect.left, false, peer, peer.right);
             }
             if (moving || right) {
-                considerX(Coordinate(peer.right) - rect.right, false);
-                considerX(Coordinate(peer.left) - rect.right, false);
+                considerX(Coordinate(peer.right) - rect.right, false, peer, peer.right);
+                considerX(Coordinate(peer.left) - rect.right, false, peer, peer.left);
             }
         }
         if (Gap(rect.left, rect.right, peer.left, peer.right) <= distance) {
             if (moving || top) {
-                considerY(Coordinate(peer.top) - rect.top, false);
-                considerY(Coordinate(peer.bottom) - rect.top, false);
+                considerY(Coordinate(peer.top) - rect.top, false, peer, peer.top);
+                considerY(Coordinate(peer.bottom) - rect.top, false, peer, peer.bottom);
             }
             if (moving || bottom) {
-                considerY(Coordinate(peer.bottom) - rect.bottom, false);
-                considerY(Coordinate(peer.top) - rect.bottom, false);
+                considerY(Coordinate(peer.bottom) - rect.bottom, false, peer, peer.bottom);
+                considerY(Coordinate(peer.top) - rect.bottom, false, peer, peer.top);
             }
         }
     }
@@ -143,6 +162,13 @@ RECT SnapRect(const RECT& proposed, SnapEdge edge, const std::vector<RECT>& work
     if (moving || right) rect.right = static_cast<LONG>(Coordinate(rect.right) + x.delta);
     if (moving || top) rect.top = static_cast<LONG>(Coordinate(rect.top) + y.delta);
     if (moving || bottom) rect.bottom = static_cast<LONG>(Coordinate(rect.bottom) + y.delta);
+    if (guides) {
+        guides->vertical = x.found; guides->horizontal = y.found;
+        const LONG vx = x.guide == std::numeric_limits<LONG>::max() ? x.guide - 1 : x.guide;
+        const LONG hy = y.guide == std::numeric_limits<LONG>::max() ? y.guide - 1 : y.guide;
+        if (x.found) guides->verticalRect = {vx, std::min(rect.top, x.begin), vx + 1, std::max(rect.bottom, x.end)};
+        if (y.found) guides->horizontalRect = {std::min(rect.left, y.begin), hy, std::max(rect.right, y.end), hy + 1};
+    }
     return rect;
 }
 

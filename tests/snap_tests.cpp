@@ -22,7 +22,7 @@ int main() {
     const std::vector<RECT> monitor{{0, 0, 1920, 1040}};
     const std::vector<RECT> none;
     Check(SnapRect({8, 9, 308, 309}, SnapEdge::Move, monitor, none), {0, 0, 300, 300},
-        "startup near corner snaps both axes and preserves size");
+        "drag near corner snaps both axes and preserves size");
     Check(SnapRect({12, 100, 312, 400}, SnapEdge::Move, monitor, none), {0, 100, 300, 400},
         "threshold is inclusive");
     Check(SnapRect({13, 100, 313, 400}, SnapEdge::Move, monitor, none), {13, 100, 313, 400},
@@ -118,6 +118,33 @@ int main() {
         "repeated coincident snap is stable");
     Check(SnapRect({8, 8, 308, 308}, SnapEdge::Move, {{1, 1, 1, 1}}, {{1, 1, 1, 1}}),
         {8, 8, 308, 308}, "invalid target rectangles are ignored");
+
+    // Repeated one-pixel pointer movements must escape attraction. Feeding the
+    // last snapped HWND rectangle back into these steps would pin it forever.
+    for (LONG step = 0; step <= 40; ++step) {
+        const auto raw = PointerDragRect({0, 0, 300, 300}, {50, 20}, {50 + step, 20 + step}, SnapEdge::Move);
+        const LONG position = step <= 12 ? 0 : step;
+        Check(SnapRect(raw, SnapEdge::Move, monitor, none),
+            {position, position, position + 300, position + 300}, "slow diagonal drag escapes a snapped screen corner");
+        const auto adjacent = PointerDragRect({200, 100, 500, 400}, {250, 120}, {250 + step, 120}, SnapEdge::Move);
+        Check(SnapRect(adjacent, SnapEdge::Move, none, peer),
+            {200 + position, 100, 500 + position, 400}, "slow drag escapes peer contact without Alt");
+        const auto resized = PointerDragRect({200, 100, 500, 400}, {500, 200}, {500 - step, 200}, SnapEdge::Right);
+        Check(SnapRect(resized, SnapEdge::Right, none, peer),
+            {200, 100, 500 - position, 400}, "slow resize escapes peer contact without moving fixed edges");
+    }
+    Check(PointerDragRect({-1000, -500, -700, -200}, {-900, -480}, {-870, -440}, SnapEdge::Move),
+        {-970, -460, -670, -160}, "pointer anchor supports negative monitor coordinates");
+    Check(PointerDragRect({100, 100, 500, 500}, {100, 100}, {120, 130}, SnapEdge::TopLeft),
+        {120, 130, 500, 500}, "corner pointer resize preserves opposite edges");
+    SnapGuides guides;
+    Check(SnapRect({192, 104, 492, 404}, SnapEdge::Move, none, peer, {}, &guides),
+        {200, 100, 500, 400}, "guide metadata leaves snap geometry unchanged");
+    Check(guides.verticalRect, {500, 100, 501, 400}, "vertical guide follows the winning contact edge");
+    Check(guides.horizontalRect, {200, 100, 800, 101}, "horizontal guide spans aligned cards");
+    SnapRect({1000, 800, 1300, 1100}, SnapEdge::Move, none, peer, {}, &guides);
+    Check(guides.vertical || guides.horizontal ? RECT{1,1,1,1} : RECT{}, {},
+        "leaving all snap targets clears guide metadata");
 
     if (failures) return 1;
     std::printf("Snap geometry: %d checks passed.\n", checks);

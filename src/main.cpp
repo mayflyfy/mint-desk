@@ -36,9 +36,11 @@
 namespace {
 constexpr wchar_t kCardClass[] = L"MintDesk.Card.1";
 constexpr wchar_t kControllerClass[] = L"MintDesk.Controller.1";
+constexpr wchar_t kSnapGuideClass[] = L"MintDesk.SnapGuide.1";
 constexpr UINT kTray = WM_APP + 1, kVisual = WM_APP + 2;
 constexpr UINT kLower = WM_APP + 3, kShow = WM_APP + 4;
 constexpr UINT kNewCard = WM_APP + 5;
+constexpr UINT kSelectionClick = WM_APP + 6;
 constexpr UINT_PTR kSaveTimer = 1, kDisplayTimer = 2;
 constexpr UINT_PTR kAnimationTimer = 10, kStatusTimer = 11;
 constexpr UINT_PTR kCaretTimer = 12, kDragScrollTimer = 13;
@@ -76,6 +78,9 @@ struct Card {
     ULONGLONG feedbackStart = 0, statusUntil = 0;
     uint64_t lastAddedToken = 0;
     bool tracking = false, placing = false, draggingScroll = false, arrangingZ = false;
+    bool inSizeMove = false, pointerDrag = false;
+    POINT dragStartCursor{};
+    RECT dragStartRect{};
     int scrollGrab = 0;
     std::wstring status;
     ~Card() {
@@ -103,9 +108,13 @@ struct Worker {
 struct Application {
     HINSTANCE instance = nullptr;
     HWND controller = nullptr;
+    HWND snapGuides[2]{};
     HICON icon = nullptr;
     HANDLE singleton = nullptr;
     HWINEVENTHOOK foregroundHook = nullptr;
+    HHOOK selectionHook = nullptr;
+    HWND pendingSelectionWindow = nullptr;
+    bool pendingSelectionClick = false;
     UINT taskbarCreated = 0;
     std::vector<std::unique_ptr<Card>> cards;
     uint32_t nextId = 1;
@@ -127,9 +136,44 @@ int Dip(const Card& card, int value) { return MulDiv(value, card.dpi, 96); }
 int Width(const RECT& r) { return r.right - r.left; }
 int Height(const RECT& r) { return r.bottom - r.top; }
 bool Inside(const RECT& r, POINT p) { return PtInRect(&r, p) != FALSE; }
-void Invalidate(Card& c) { InvalidateRect(c.hwnd, nullptr, FALSE); }
+LRESULT CALLBACK SelectionPointer(int code, WPARAM message, LPARAM parameter) {
+    if (code==HC_ACTION && (message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN ||
+        message==WM_MBUTTONDOWN || message==WM_XBUTTONDOWN) && app.controller) {
+        const auto* input=reinterpret_cast<const MSLLHOOKSTRUCT*>(parameter);
+        const HWND target=GetAncestor(WindowFromPoint(input->pt),GA_ROOT);
+        PostMessageW(app.controller,kSelectionClick,reinterpret_cast<WPARAM>(target),0);
+    }
+    return CallNextHookEx(nullptr,code,message,parameter);
+}
+void SyncSelectionHook() {
+    const bool selected=std::any_of(app.cards.begin(),app.cards.end(),
+        [](const std::unique_ptr<Card>& card){return card->selected>=0;});
+    if (selected && !app.selectionHook && !app.quitting)
+        app.selectionHook=SetWindowsHookExW(WH_MOUSE_LL,SelectionPointer,app.instance,0);
+    else if (!selected && app.selectionHook) { UnhookWindowsHookEx(app.selectionHook); app.selectionHook=nullptr; }
+}
+void Invalidate(Card& c) { SyncSelectionHook(); InvalidateRect(c.hwnd, nullptr, FALSE); }
 void Notify(Card& c,const std::wstring& message);
 void Dirty() { if (!app.quitting && !app.displayChanging && !app.preview) SetTimer(app.controller, kSaveTimer, 350, nullptr); }
+
+void ClearSelection(Card& card) {
+    if (card.selected < 0) return;
+    card.selected = -1; Invalidate(card);
+}
+void ClearSelections(const Card* keep = nullptr) {
+    for (auto& card : app.cards) if (card.get() != keep) ClearSelection(*card);
+}
+bool CardInputWindow(HWND window) {
+    if (window && window == app.controller) return true;
+    for (const auto& card : app.cards)
+        if (window && (window == card->hwnd || IsChild(card->hwnd, window))) return true;
+    return false;
+}
+void SelectionClicked(HWND window) {
+    const Card* keep=nullptr;
+    for (const auto& card:app.cards) if (window==card->hwnd || IsChild(card->hwnd,window)) { keep=card.get(); break; }
+    ClearSelections(keep); SyncSelectionHook();
+}
 
 struct CriticalLock {
     CRITICAL_SECTION& mutex;
@@ -142,7 +186,13 @@ struct CriticalLock {
 struct ModalScope {
     ModalScope() { ++app.modalDepth; }
     ~ModalScope() {
-        if (!--app.modalDepth && app.pendingQuit) PostMessageW(app.controller, WM_CLOSE, 0, 0);
+        if (!--app.modalDepth) {
+            if (app.pendingSelectionClick) {
+                app.pendingSelectionClick=false;
+                PostMessageW(app.controller,kSelectionClick,reinterpret_cast<WPARAM>(app.pendingSelectionWindow),0);
+            }
+            if (app.pendingQuit) PostMessageW(app.controller, WM_CLOSE, 0, 0);
+        }
     }
 };
 struct CardDragScope {
@@ -220,7 +270,7 @@ void Fonts(Card& c) {
 bool DesktopSurface(HWND window) {
     wchar_t name[64]{};
     GetClassNameW(window,name,ARRAYSIZE(name));
-    return !wcscmp(name,kCardClass)||!wcscmp(name,L"MintDesk.Backdrop.1");
+    return !wcscmp(name,kCardClass)||!wcscmp(name,L"MintDesk.Backdrop.1")||!wcscmp(name,kSnapGuideClass);
 }
 
 HWND DesktopIconHost() {
@@ -267,6 +317,7 @@ void FocusCard(Card& card,HWND target) {
     // Request keyboard focus only for explicit input, after automatic mouse
     // activation has been suppressed. The z-order guard also covers these API
     // activation requests, so focused cards remain behind ordinary windows.
+    ClearSelections(&card);
     SetForegroundWindow(card.hwnd); SetActiveWindow(card.hwnd);
     SetFocus(target); PlaceAtDesktop(card.hwnd);
 }
@@ -291,18 +342,72 @@ void EnforceDesktopBand(Card& card) {
     card.arrangingZ=false;
 }
 
-void SnapCardRect(Card& card, RECT& proposed, desk::SnapEdge edge) {
+LRESULT CALLBACK SnapGuideProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+    if (message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{}; HDC dc = BeginPaint(hwnd, &paint);
+        RECT area{}; GetClientRect(hwnd, &area);
+        FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        HPEN pen = CreatePen(PS_DOT, 1, kAccent);
+        HGDIOBJ previous = SelectObject(dc, pen); SetBkMode(dc, TRANSPARENT);
+        MoveToEx(dc, 0, 0, nullptr);
+        LineTo(dc, Width(area) > Height(area) ? area.right : 0,
+            Width(area) > Height(area) ? 0 : area.bottom);
+        SelectObject(dc, previous); DeleteObject(pen); EndPaint(hwnd, &paint); return 0;
+    }
+    return DefWindowProcW(hwnd, message, wp, lp);
+}
+
+void HideSnapGuides() {
+    for (HWND guide : app.snapGuides) if (guide) ShowWindow(guide, SW_HIDE);
+}
+void ShowSnapGuides(const desk::SnapGuides& guides) {
+    const bool visible[] = {guides.vertical, guides.horizontal};
+    const RECT rectangles[] = {guides.verticalRect, guides.horizontalRect};
+    for (int i = 0; i < 2; ++i) {
+        if (!visible[i]) { if (app.snapGuides[i]) ShowWindow(app.snapGuides[i], SW_HIDE); continue; }
+        if (!app.snapGuides[i]) {
+            app.snapGuides[i] = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+                kSnapGuideClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, app.instance, nullptr);
+            if (app.snapGuides[i]) SetLayeredWindowAttributes(app.snapGuides[i], RGB(0,0,0), 205, LWA_COLORKEY | LWA_ALPHA);
+        }
+        if (app.snapGuides[i]) {
+            PlaceAtDesktop(app.snapGuides[i], &rectangles[i]);
+            ShowWindow(app.snapGuides[i], SW_SHOWNOACTIVATE);
+            InvalidateRect(app.snapGuides[i], nullptr, FALSE);
+        }
+    }
+}
+
+void SnapCardRect(Card& card, RECT& proposed, desk::SnapEdge edge, bool feedback = false, bool snapping = true) {
     if (card.state.locked) return;
-    const auto monitors=desk::EnumerateMonitors();
     std::vector<RECT> workAreas, peers;
-    workAreas.reserve(monitors.size()); peers.reserve(app.cards.size());
-    for (const auto& monitor:monitors) workAreas.push_back(monitor.work);
-    for (auto& peer:app.cards) {
-        if (peer.get()==&card || !peer->hwnd || IsIconic(peer->hwnd)) continue;
-        RECT rect{}; if (GetWindowRect(peer->hwnd,&rect)) peers.push_back(rect);
+    if (snapping) {
+        const auto monitors=desk::EnumerateMonitors();
+        workAreas.reserve(monitors.size()); peers.reserve(app.cards.size());
+        for (const auto& monitor:monitors) workAreas.push_back(monitor.work);
+        for (auto& peer:app.cards) {
+            if (peer.get()==&card || !peer->hwnd || IsIconic(peer->hwnd)) continue;
+            RECT rect{}; if (GetWindowRect(peer->hwnd,&rect)) peers.push_back(rect);
+        }
     }
     const desk::SnapSettings settings{Dip(card,12),Dip(card,228),Dip(card,card.state.collapsed?32:190)};
-    proposed=desk::SnapRect(proposed,edge,workAreas,peers,settings);
+    desk::SnapGuides guides;
+    proposed=desk::SnapRect(proposed,edge,workAreas,peers,settings,&guides);
+    if (feedback) ShowSnapGuides(guides);
+}
+
+void MoveCardRect(Card& card, RECT& proposed, desk::SnapEdge edge) {
+    if (card.state.locked) return;
+    if (card.pointerDrag) {
+        POINT cursor{};
+        if (GetCursorPos(&cursor)) proposed = desk::PointerDragRect(card.dragStartRect, card.dragStartCursor, cursor, edge);
+    }
+    // Keyboard move/resize is exact. Alt also permits fine mouse positioning.
+    const bool snapping = (!card.inSizeMove || card.pointerDrag) && !(GetAsyncKeyState(VK_MENU) & 0x8000);
+    SnapCardRect(card, proposed, edge, card.inSizeMove, snapping);
 }
 
 DWORD WINAPI WorkerMain(void* param) {
@@ -1009,6 +1114,7 @@ void HandleCommand(Card* c, UINT command) {
             const HWND window=c->hwnd;
             DestroyWindow(window);
             app.cards.erase(std::remove_if(app.cards.begin(),app.cards.end(),[&](const std::unique_ptr<Card>& card) {return card.get()==c;}),app.cards.end());
+            SyncSelectionHook();
             Dirty(); return;
         } break;
     case Open: OpenSelected(*c); break;
@@ -1208,10 +1314,12 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_NCLBUTTONDBLCLK: if (wp==HTCAPTION) { BeginRename(c); return 0; } break;
+    case WM_NCLBUTTONDOWN: ClearSelections(); break;
     case WM_NCRBUTTONUP: case WM_CONTEXTMENU: {
         POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
         if (p.x==-1 && p.y==-1) { p={Dip(c,20),Dip(c,38)}; ClientToScreen(hwnd,&p); }
         POINT local=p; ScreenToClient(hwnd,&local);
+        ClearSelections(&c);
         const int index=HitItem(c,local);
         if (index>=0) { c.selected=index; Invalidate(c); }
         Menu(&c,p,index>=0); return 0;
@@ -1220,8 +1328,12 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
         if (c.editor) FinishRename(c,true);
         const int button=HeaderHit(c,p);
+        ClearSelections(button || p.y<Dip(c,32) ? nullptr : &c);
         c.headerHover=button; c.headerPressed=button; c.mouseDownItem=-1;
         if (button) { SetCapture(hwnd); Invalidate(c); return 0; }
+        if (c.state.locked && p.y<Dip(c,32)) {
+            Notify(c,L"卡片已锁定，点击右上角锁图标后可拖动"); return 0;
+        }
         FocusCard(c,hwnd);
         if (MaxScroll(c)>0 && Inside(ScrollTrack(c),p)) {
             RECT thumb=ScrollThumb(c);
@@ -1362,22 +1474,33 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         HDROP drop=reinterpret_cast<HDROP>(wp);
         auto paths=desk::PathsFromDrop(drop); DragFinish(drop); AddPaths(c,paths); return 0;
     }
-    case WM_ENTERSIZEMOVE: if (c.editor) FinishRename(c,true); return 0;
+    case WM_ENTERSIZEMOVE:
+        if (c.editor) FinishRename(c,true);
+        ClearSelections();
+        if (!c.inSizeMove) { c.inSizeMove=true; ++app.modalDepth; }
+        c.pointerDrag=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0 &&
+            GetCursorPos(&c.dragStartCursor) && GetWindowRect(hwnd,&c.dragStartRect);
+        return 0;
     case WM_MOVING:
-        if (lp && !c.state.locked && !(GetAsyncKeyState(VK_MENU)&0x8000))
-            SnapCardRect(c,*reinterpret_cast<RECT*>(lp),desk::SnapEdge::Move);
+        if (lp) MoveCardRect(c,*reinterpret_cast<RECT*>(lp),desk::SnapEdge::Move);
         return TRUE;
     case WM_SIZING:
         if (c.state.collapsed&&wp!=WMSZ_LEFT&&wp!=WMSZ_RIGHT) return TRUE;
-        if (lp && wp>=WMSZ_LEFT && wp<=WMSZ_BOTTOMRIGHT && !c.state.locked && !(GetAsyncKeyState(VK_MENU)&0x8000))
-            SnapCardRect(c,*reinterpret_cast<RECT*>(lp),static_cast<desk::SnapEdge>(wp));
+        if (lp && wp>=WMSZ_LEFT && wp<=WMSZ_BOTTOMRIGHT)
+            MoveCardRect(c,*reinterpret_cast<RECT*>(lp),static_cast<desk::SnapEdge>(wp));
         return TRUE;
     case WM_EXITSIZEMOVE:
+        HideSnapGuides(); c.pointerDrag=false;
+        if (c.inSizeMove) {
+            c.inSizeMove=false;
+            if (app.modalDepth && !--app.modalDepth && app.pendingQuit) PostMessageW(app.controller,WM_CLOSE,0,0);
+        }
         desk::CaptureCardRect(c.state,hwnd); ClampScroll(c); Dirty(); return 0;
     case WM_SIZE: ClampScroll(c); Invalidate(c); return 0;
     case WM_DPICHANGED: {
         FinishRename(c,true); c.dpi=HIWORD(wp); Fonts(c);
         auto* suggested=reinterpret_cast<RECT*>(lp);
+        if (c.pointerDrag) { c.dragStartRect=*suggested; GetCursorPos(&c.dragStartCursor); }
         if (!c.placing && !app.displayChanging)
             SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,Width(*suggested),Height(*suggested),SWP_NOZORDER|SWP_NOACTIVATE);
         ReloadVisuals(c); ClampScroll(c); Invalidate(c); Dirty(); return 0;
@@ -1388,7 +1511,16 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         c.glass.Apply(app.opacity!=255); SyncBackdrop(c); Invalidate(c);
         if (wp==SPI_SETWORKAREA) PostMessageW(app.controller,WM_SETTINGCHANGE,wp,lp);
         return 0;
-    case WM_ACTIVATE: PostMessageW(app.controller,kLower,0,0); return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp)==WA_INACTIVE && !app.modalDepth) ClearSelection(c);
+        PostMessageW(app.controller,kLower,0,0); return 0;
+    case WM_ACTIVATEAPP:
+        if (!wp && !app.modalDepth) ClearSelections();
+        return 0;
+    case WM_KILLFOCUS:
+        if (!app.modalDepth && reinterpret_cast<HWND>(wp)!=c.editor &&
+            !IsChild(hwnd,reinterpret_cast<HWND>(wp))) ClearSelection(c);
+        return 0;
     case WM_SYSCOMMAND:
         if ((wp&0xfff0)==SC_CLOSE) return 0; // Alt+F4 must not silently lose a card.
         if ((wp&0xfff0)==SC_MAXIMIZE || (wp&0xfff0)==SC_MINIMIZE) return 0;
@@ -1436,7 +1568,6 @@ Card* CreateCard(desk::CardState state) {
         card->dpi=monitors.front().dpi;
         for (const auto& monitor:monitors) if (monitor.device==card->state.monitor) { card->dpi=monitor.dpi; break; }
     }
-    SnapCardRect(*card,rect,desk::SnapEdge::Move);
     card->placing=true;
     HWND hwnd=CreateWindowExW((app.preview?WS_EX_APPWINDOW:WS_EX_TOOLWINDOW)|WS_EX_LAYERED|WS_EX_NOACTIVATE,kCardClass,card->state.title.c_str(),WS_POPUP|WS_THICKFRAME|WS_CLIPCHILDREN,
         rect.left,rect.top,Width(rect),Height(rect),nullptr,nullptr,app.instance,card.get());
@@ -1472,7 +1603,6 @@ void ReflowDisplays() {
     auto monitors=desk::EnumerateMonitors();
     for (auto& card:app.cards) {
         RECT rect=desk::ResolveCardRect(card->state,monitors);
-        SnapCardRect(*card,rect,desk::SnapEdge::Move);
         card->placing=true; PlaceAtDesktop(card->hwnd,&rect); card->placing=false;
         desk::CaptureCardRect(card->state,card->hwnd);
     }
@@ -1503,7 +1633,13 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         else if (event==NIN_SELECT || event==NIN_KEYSELECT || event==WM_LBUTTONDBLCLK) HandleCommand(nullptr,ShowCards);
         return 0;
     }
-    case kLower: LowerCards(); return 0;
+    case kLower:
+        if (!app.modalDepth && !CardInputWindow(GetForegroundWindow())) ClearSelections();
+        LowerCards(); return 0;
+    case kSelectionClick:
+        if (app.modalDepth) { app.pendingSelectionClick=true; app.pendingSelectionWindow=reinterpret_cast<HWND>(wp); }
+        else SelectionClicked(reinterpret_cast<HWND>(wp));
+        return 0;
     case kShow: HandleCommand(nullptr,ShowCards); return 0;
     case kNewCard: HandleCommand(nullptr,NewCard); return 0;
     case WM_TIMER:
@@ -1542,6 +1678,8 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             app.exitCode=2;
         }
         if (app.foregroundHook) { UnhookWinEvent(app.foregroundHook); app.foregroundHook=nullptr; }
+        if (app.selectionHook) { UnhookWindowsHookEx(app.selectionHook); app.selectionHook=nullptr; }
+        for (HWND& guide : app.snapGuides) if (guide) { DestroyWindow(guide); guide=nullptr; }
         if (app.trayAdded) Tray(NIM_DELETE);
         Save();
         if (!app.preview) desk::RefreshDesktopMenu(false);
@@ -1605,6 +1743,9 @@ bool Initialize(HINSTANCE instance) {
     WNDCLASSEXW controller{}; controller.cbSize=sizeof(controller); controller.lpfnWndProc=ControllerProc;
     controller.hInstance=instance; controller.lpszClassName=kControllerClass;
     if (!RegisterClassExW(&controller)) return false;
+    WNDCLASSEXW guide{}; guide.cbSize=sizeof(guide); guide.lpfnWndProc=SnapGuideProc;
+    guide.hInstance=instance; guide.lpszClassName=kSnapGuideClass;
+    if (!RegisterClassExW(&guide)) return false;
     app.taskbarCreated=RegisterWindowMessageW(L"TaskbarCreated");
     app.controller=CreateWindowExW(WS_EX_TOOLWINDOW,kControllerClass,app.preview?L"MintDesk Preview":L"MintDesk",WS_POPUP,0,0,0,0,nullptr,nullptr,instance,nullptr);
     if (!app.controller) return false;
@@ -1629,7 +1770,7 @@ bool Initialize(HINSTANCE instance) {
     if (!app.preview) {
         app.trayAdded=Tray(NIM_ADD);
         if(!desk::EnsureDefaultIntegrations())
-            for(auto& c:app.cards)Notify(*c,L"自启动或桌面右键未完成配置，请在托盘中检查");
+            for(auto& c:app.cards)Notify(*c,L"桌面快捷方式、自启动或右键未完成配置，请检查目录权限和托盘设置");
     }
     if (!app.preview) desk::RefreshDesktopMenu(true);
     app.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,ForegroundChanged,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);

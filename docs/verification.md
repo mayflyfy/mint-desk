@@ -1,6 +1,6 @@
 # Verification
 
-First public release: v0.8.0, Windows x64. Results describe tested environments, not every machine.
+Current release: v0.8.1, Windows x64. Results describe tested environments, not every machine.
 
 ## Automated checks
 
@@ -10,21 +10,21 @@ First public release: v0.8.0, Windows x64. Results describe tested environments,
 | --- | --- |
 | state | CRC, backup recovery, Unicode, layouts, monitor geometry |
 | shell | Path validation, icon ownership, missing files |
-| snap | Screen/card alignment, resize constraints, coordinates, DPI |
+| snap | Screen/card alignment, cumulative one-pixel drag/resize escape, guide geometry, negative coordinates, DPI |
 | desktop_menu | Isolated registry registration, quoting, one dynamic action |
-| startup_integration | First-run defaults, later manual opt-outs, partial-failure retry, malformed preferences |
+| startup_integration | First-run defaults, manual opt-outs, retry, malformed preferences; isolated native shortcut creation, target refresh, identity/visibility preservation, collision protection |
 | alpha_surface | Background transparency with opaque foreground content |
 | desktop_items | Legacy recovery, collision handling, durable intent |
 | hidden_items | In-place visibility, occupied folders, identity, attribute restoration, corrupt/write-failed journals, watcher recovery |
 | file_helper | Narrow path/identity boundaries, no replacement, limited attribute changes |
 | dragdrop | OLE ownership, cancellation, drag-image cleanup, external-drop preparation |
-| ui | Native procedures, title editing, collapse, menus, ordering, transfer, icons, external-copy visibility |
+| ui | Cross-card/focus selection clearing, saved user-layout reopening, non-activating click-through guides, exact keyboard movement; title editing, collapse, menus, ordering, transfer, external-copy visibility |
 
 Tests do not require real user files or installed third-party apps. Geometry and compositor checks depend on the Windows desktop session.
 
 ## Local observations
 
-- All eleven native suites passed after the MintDesk rename and first-run integration changes, using Windows x64 and MinGW-w64 GCC 10.3.
+- All eleven native suites passed for v0.8.1, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
 - Renaming retains the old recovery directory when present, without moving/copying its journals. New installations use the MintDesk data directory. Cross-version singleton and mutation mutex identities remain compatible.
 - Synthetic items kept their original paths, identities, and bytes while hidden. Explorer desktop view removal was approximately 31–32 ms in a local sample. They remained hidden after refresh and reappeared on restoration.
 - Timing measures the desktop view collection, not mouse-to-screen latency or all systems.
@@ -33,8 +33,10 @@ Tests do not require real user files or installed third-party apps. Geometry and
 - A temporary child exited without cleanup; a separate watcher recovered synthetic fixture visibility. No user's normal instance was force-closed.
 - A temporary external copy retained original visibility instead of temporary organizer flags.
 - The EXE imports only Windows system DLLs; no extra runtime installation is needed.
-- The native release EXE is approximately 409 KiB. One short UI sample used about 30.85 MiB working set and 9.01 MiB private memory; the recovery watcher and optional permission helper are separate processes. These are observations, not minimum-resource guarantees.
-- A Windows CI workflow is prepared; remote execution awaits publication of the repository.
+- The native v0.8.1 release EXE is 415 KiB (424,960 bytes). A short v0.8.1 UI sample used about 31.24 MiB working set and 8.89 MiB private memory, with no main-process CPU time increase over five idle seconds; the recovery watcher and optional permission helper are separate processes. These are observations, not minimum-resource guarantees.
+- A local in-place update retained the saved cards, file-reference order, appearance and lock preferences. Layout coordinates differed by at most one DIP due to monitor/DPI conversion. The real per-user desktop shortcut was created and its target verified.
+- Outside-click dismissal installs its event-driven mouse hook only while an item is selected, forwards all input unchanged, defers menu dismissal until its command completes, and removes the hook when selection clears. Regression coverage includes desktop clicks without a foreground change.
+- The Windows CI workflow builds all eleven suites, packages the portable executable, and audits source and release contents.
 
 ## Screenshot provenance
 

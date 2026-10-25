@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <string>
 
 namespace desk {
 // Applies defaults once, only for normal UI startup. Later manual opt-outs
@@ -12,5 +13,6 @@ struct IntegrationCallbacks {
     bool (*desktopMenu)(void*,bool)=nullptr;
 };
 bool EnsureDefaultIntegrationsAtKey(HKEY preferences,const IntegrationCallbacks& callbacks);
+bool EnsureDesktopShortcutAt(const std::wstring& desktop,const std::wstring& executable);
 }
 }

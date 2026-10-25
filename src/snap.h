@@ -20,11 +20,20 @@ struct SnapSettings {
     int minimumHeight = 190;
 };
 
+struct SnapGuides {
+    bool vertical = false, horizontal = false;
+    RECT verticalRect{}, horizontalRect{};
+};
+
+// Use the original pointer anchor, never the previously snapped rectangle.
+// Small mouse deltas must accumulate so a snapped card can always move away.
+RECT PointerDragRect(const RECT& initial, POINT start, POINT current, SnapEdge edge);
+
 // All rectangles and settings use physical pixels. The caller applies DPI scaling.
 // Moving preserves size. Resizing changes only the edge(s) being dragged.
 // Only the nearest / greatest-intersection work area attracts a rectangle.
 RECT SnapRect(const RECT& proposed, SnapEdge edge,
     const std::vector<RECT>& workAreas, const std::vector<RECT>& peers,
-    const SnapSettings& settings = {});
+    const SnapSettings& settings = {}, SnapGuides* guides = nullptr);
 
 } // namespace desk

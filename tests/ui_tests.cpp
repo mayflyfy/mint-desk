@@ -7,13 +7,21 @@ namespace desk {
 bool SaveUiTestState(const AppState&);
 bool RefreshUiTestDesktopMenu(bool);
 }
+namespace {
+BOOL UiTestCursor(LPPOINT);
+SHORT UiTestAsyncKey(int);
+}
 #define SaveState SaveUiTestState
 #define RefreshDesktopMenu RefreshUiTestDesktopMenu
+#define GetCursorPos UiTestCursor
+#define GetAsyncKeyState UiTestAsyncKey
 #define wWinMain MintDeskAppEntry
 #include "../src/main.cpp"
 #undef wWinMain
 #undef RefreshDesktopMenu
 #undef SaveState
+#undef GetCursorPos
+#undef GetAsyncKeyState
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +30,16 @@ bool RefreshUiTestDesktopMenu(bool);
 namespace {
 std::wstring uiTestStateDirectory;
 unsigned uiTestSaveCalls = 0, uiTestMenuRefreshCalls = 0;
+bool uiTestPointerInjected=false;
+POINT uiTestPointer{};
+BOOL UiTestCursor(LPPOINT point) {
+    if(uiTestPointerInjected){*point=uiTestPointer;return TRUE;}
+    return ::GetCursorPos(point);
+}
+SHORT UiTestAsyncKey(int key) {
+    if(uiTestPointerInjected)return key==VK_LBUTTON?static_cast<SHORT>(0x8000):0;
+    return ::GetAsyncKeyState(key);
+}
 }
 namespace desk {
 bool SaveUiTestState(const AppState& state) {
@@ -180,6 +198,84 @@ struct Fixture {
         return GetFileAttributesW(original.c_str()) != INVALID_FILE_ATTRIBUTES;
     }
 };
+
+void TestSelectionDismissal(const Fixture& fixture) {
+    desk::CardState state; state.id=app.nextId++; state.title=L"selection fixture";
+    state.layout=desk::Layout::List; state.paths={fixture.original};
+    Card* first=CreateCard(state); state.id=app.nextId++;
+    Card* second=CreateCard(state);
+    CheckUi(first && second,"create independent selection fixtures");
+    if (first && second) {
+        const auto click=[](Card& card) {
+            const RECT item=ItemRect(card,0); const LPARAM point=MAKELPARAM(item.left+5,item.top+5);
+            SendMessageW(card.hwnd,WM_LBUTTONDOWN,MK_LBUTTON,point);
+            SendMessageW(card.hwnd,WM_LBUTTONUP,0,point);
+        };
+        click(*first); CheckUi(first->selected==0 && app.selectionHook,"click selects a card item and enables its event-only click watcher");
+        SendMessageW(app.controller,kSelectionClick,reinterpret_cast<WPARAM>(GetDesktopWindow()),0);
+        CheckUi(first->selected==-1 && !app.selectionHook,
+            "desktop click clears selection even without activation/focus changes and removes the idle watcher");
+        click(*first);
+        click(*second);
+        CheckUi(first->selected==-1 && second->selected==0,"clicking another card clears the old selection");
+        SendMessageW(first->hwnd,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(20,20));
+        CheckUi(second->selected==-1,"clicking another card title also clears selection");
+        click(*first);
+        SendMessageW(first->hwnd,WM_ACTIVATE,WA_INACTIVE,reinterpret_cast<LPARAM>(GetDesktopWindow()));
+        CheckUi(first->selected==-1,"desktop activation clears the selected highlight");
+        first->selected=0;
+        SendMessageW(first->hwnd,WM_KILLFOCUS,reinterpret_cast<WPARAM>(GetDesktopWindow()),0);
+        CheckUi(first->selected==-1,"external focus clears selection without another card click");
+        first->selected=0; second->selected=0;
+        SendMessageW(first->hwnd,WM_ACTIVATEAPP,FALSE,0);
+        CheckUi(first->selected==-1 && second->selected==-1,"switching away clears every card selection");
+        first->selected=0; BeginRename(*first);
+        CheckUi(first->editor && first->selected==0,"title editor focus does not lose the card selection");
+        FinishRename(*first,false);
+        first->selected=0;
+        { ModalScope modal;
+            SendMessageW(first->hwnd,WM_KILLFOCUS,0,0);
+            CheckUi(first->selected==0,"native popup menu focus retains its selected command target");
+            SendMessageW(app.controller,kSelectionClick,reinterpret_cast<WPARAM>(GetDesktopWindow()),0);
+            CheckUi(first->selected==0 && app.pendingSelectionClick,"popup click defers dismissal until its command can use the selected item");
+        }
+        MSG deferred{};
+        if(PeekMessageW(&deferred,app.controller,kSelectionClick,kSelectionClick,PM_REMOVE))DispatchMessageW(&deferred);
+        CheckUi(first->selected==-1 && !app.selectionHook,"deferred outside click clears selection after the native popup completes");
+    }
+    if(second) HandleCommand(second,RemoveCard);
+    if(first) HandleCommand(first,RemoveCard);
+}
+
+void TestSavedUserLayout(const Fixture& fixture) {
+    const auto monitors=desk::EnumerateMonitors(); if(monitors.empty())return;
+    const auto userRoot=fixture.directory+L"\\UserData";
+    CheckUi(CreateDirectoryW(userRoot.c_str(),nullptr)!=FALSE,"create isolated user-data root");
+    const auto data=desk::testing::DataDirectoryUnder(userRoot);
+    desk::AppState saved; saved.nextId=app.nextId+3;
+    for(int i=0;i<3;++i) {
+        desk::CardState state;state.id=app.nextId++;state.title=L"saved user card "+std::to_wstring(i);
+        state.monitor=monitors.front().device;state.x=3+i*310;state.y=4;
+        state.width=300;state.height=250;state.locked=i==1;
+        state.paths={fixture.original,fixture.directory+L"\\saved-shortcut.lnk"};
+        saved.cards.push_back(state);
+    }
+    CheckUi(desk::testing::SaveStateToDirectory(data,saved),"save user layout outside any executable directory");
+    desk::AppState restored;
+    CheckUi(desk::testing::LoadStateFromDirectory(desk::testing::DataDirectoryUnder(userRoot),restored) &&
+        restored.cards.size()==3,"a subsequent version reopens all saved user cards");
+    for(size_t i=0;i<restored.cards.size();++i) {
+        const auto& state=restored.cards[i];
+        Card* card=CreateCard(state);
+        CheckUi(card && card->state.paths==saved.cards[i].paths && card->state.locked==saved.cards[i].locked &&
+            EqualRect(WindowRect(card->hwnd),desk::ResolveCardRect(saved.cards[i],monitors)),
+            "reopening preserves file order, lock state and custom near-edge placement without snapping");
+        if(card)HandleCommand(card,RemoveCard);
+    }
+    for(const auto* name:{L"state.dat",L"state.backup.dat",L"state.dat.tmp",L"state.backup.dat.tmp"})
+        DeleteFileW((data+L"\\"+name).c_str());
+    CheckUi(RemoveDirectoryW(data.c_str()) && RemoveDirectoryW(userRoot.c_str()),"remove only isolated user-data fixtures");
+}
 
 void TestReferencesAndInput(Card& card, const Fixture& fixture) {
     const std::wstring unicode = fixture.directory + L"\\\u9879\u76ee \U0001F4BB.lnk";
@@ -377,6 +473,7 @@ void TestCoreMenus(Card& card) {
             MF_BYCOMMAND) & MF_CHECKED) != 0, "card menu checks the current layout");
         DestroyMenu(cardMenu);
     }
+    card.selected = card.items.empty() ? -1 : 0;
     HMENU itemMenu = BuildMenu(&card, true);
     CheckUi(itemMenu != nullptr, "construct native reference menu");
     if (itemMenu) {
@@ -1242,8 +1339,8 @@ void TestNativeSnapping(Card& card) {
     CheckUi(peer && IsWindow(peer->hwnd), "create native startup-snap fixture");
     if (peer) {
         RECT startup = WindowRect(peer->hwnd);
-        CheckUi(startup.left == work.left && startup.top == work.top,
-            "opening a card snaps a restored near-edge position to the work area");
+        CheckUi(startup.left == work.left+MulDiv(2,monitor.dpi,96) && startup.top == work.top+MulDiv(3,monitor.dpi,96),
+            "opening a card retains the user's custom near-edge gap");
         ShowWindow(peer->hwnd, SW_HIDE);
         RECT anchor{work.left + width + 60, work.top + 40,
             work.left + width * 2 + 60, work.top + 40 + height};
@@ -1276,6 +1373,50 @@ void TestNativeSnapping(Card& card) {
         HandleCommand(peer, RemoveCard);
     }
     card.state.locked = wasLocked;
+    const HWND foreground=GetForegroundWindow();
+    desk::SnapGuides guides; guides.vertical=guides.horizontal=true;
+    guides.verticalRect={work.left+40,work.top+40,work.left+41,work.top+240};
+    guides.horizontalRect={work.left+40,work.top+40,work.left+240,work.top+41};
+    ShowSnapGuides(guides);
+    for(HWND guide:app.snapGuides) {
+        const LONG_PTR style=GetWindowLongPtrW(guide,GWL_EXSTYLE);
+        CheckUi(guide && IsWindowVisible(guide) && (style&WS_EX_TRANSPARENT) && (style&WS_EX_NOACTIVATE) &&
+            SendMessageW(guide,WM_NCHITTEST,0,0)==HTTRANSPARENT,
+            "temporary alignment guides are visible, click-through and non-activating");
+    }
+    CheckUi(GetForegroundWindow()==foreground,"alignment guides do not steal foreground focus");
+    const auto depth=app.modalDepth;
+    card.state.locked=false;
+    SendMessageW(card.hwnd,WM_ENTERSIZEMOVE,0,0); card.pointerDrag=false;
+    moving={work.left+3,work.top+4,work.left+3+width,work.top+4+height};
+    const RECT exact=moving;
+    SendMessageW(card.hwnd,WM_MOVING,0,reinterpret_cast<LPARAM>(&moving));
+    CheckUi(EqualRect(moving,exact),"keyboard positioning bypasses snap for fine adjustments");
+    SendMessageW(card.hwnd,WM_EXITSIZEMOVE,0,0);
+    CheckUi(app.modalDepth==depth && !card.inSizeMove &&
+        std::none_of(std::begin(app.snapGuides),std::end(app.snapGuides),[](HWND guide){return IsWindowVisible(guide)!=FALSE;}),
+        "finishing movement removes guides and releases its modal scope");
+    card.state.locked=wasLocked;
+    // Feed real WM_MOVING handlers incremental native proposals while the
+    // pointer advances one pixel at a time. No system pointer input is sent.
+    card.state.locked=false;
+    PositionForTest(card,{work.left,work.top,work.left+width,work.top+height});
+    uiTestPointer={work.left+50,work.top+20};uiTestPointerInjected=true;
+    SendMessageW(card.hwnd,WM_ENTERSIZEMOVE,0,0);
+    CheckUi(card.pointerDrag,"mouse move loop records its initial pointer anchor");
+    RECT incremental=WindowRect(card.hwnd);
+    const int threshold=Dip(card,12);
+    for(int step=1;step<=threshold+30;++step) {
+        ++uiTestPointer.x;++uiTestPointer.y;
+        OffsetRect(&incremental,1,1);
+        SendMessageW(card.hwnd,WM_MOVING,0,reinterpret_cast<LPARAM>(&incremental));
+        const LONG delta=step<=threshold?0:step;
+        CheckUi(incremental.left==work.left+delta && incremental.top==work.top+delta &&
+            Width(incremental)==width && Height(incremental)==height,
+            "native mouse move escapes the corner under repeated one-pixel movement");
+    }
+    SendMessageW(card.hwnd,WM_EXITSIZEMOVE,0,0);
+    uiTestPointerInjected=false;card.state.locked=wasLocked;
     for (size_t i = 0; i < originalRects.size(); ++i)
         PositionForTest(*app.cards[i], originalRects[i]);
 }
@@ -1661,6 +1802,8 @@ int wmain() {
             if (!app.cards.empty() && fixture.ready) {
                 Card& card = *app.cards.front();
                 TestReferencesAndInput(card, fixture);
+                TestSelectionDismissal(fixture);
+                TestSavedUserLayout(fixture);
                 TestCompactHeaderAndInput(card);
                 TestDesktopLayerAndKeyboard(fixture);
                 TestGlassBackdropLifecycle();
