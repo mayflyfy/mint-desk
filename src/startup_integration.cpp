@@ -18,15 +18,30 @@ bool Configure(HKEY key,const testing::IntegrationCallbacks& callbacks) {
     if(!(completed&1u)) {
         if(callbacks.autostart(callbacks.context,true)){completed|=1u;if(!save())return false;}
         else success=false;
+    } else if(callbacks.autostartNeedsRefresh&&callbacks.autostartNeedsRefresh(callbacks.context)) {
+        if(!callbacks.autostart(callbacks.context,true))success=false;
     }
     if(!(completed&2u)) {
         if(callbacks.desktopMenu(callbacks.context,true)){completed|=2u;if(!save())return false;}
         else success=false;
+    } else if(callbacks.desktopMenuNeedsRefresh&&callbacks.desktopMenuNeedsRefresh(callbacks.context)) {
+        if(!callbacks.desktopMenu(callbacks.context,true))success=false;
     }
     return success;
 }
 bool Autostart(void*,bool enabled){return SetAutostart(enabled);}
 bool DesktopMenu(void*,bool enabled){return SetDesktopMenu(enabled);}
+bool AutostartNeedsRefresh(void*) {
+    DWORD size=0;
+    const bool exists=RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        L"MintDesk",RRF_RT_REG_SZ,nullptr,nullptr,&size)==ERROR_SUCCESS&&size>sizeof(wchar_t);
+    return exists&&!IsAutostartEnabled();
+}
+bool DesktopMenuNeedsRefresh(void*) {
+    HKEY key=nullptr;
+    if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Classes\\DesktopBackground\\Shell\\MintDesk",0,KEY_READ,&key)!=ERROR_SUCCESS)return false;
+    RegCloseKey(key);return !IsDesktopMenuRegistered();
+}
 
 template<class T> struct Com {
     T* value=nullptr;
@@ -98,7 +113,7 @@ bool EnsureDefaultIntegrations() {
     HKEY key=nullptr;
     if(RegCreateKeyExW(HKEY_CURRENT_USER,kPreferences,0,nullptr,0,KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
     bool success=false;
-    try{const bool registrations=Configure(key,{nullptr,Autostart,DesktopMenu});
+    try{const bool registrations=Configure(key,{nullptr,Autostart,DesktopMenu,AutostartNeedsRefresh,DesktopMenuNeedsRefresh});
         const bool shortcut=DesktopShortcut();success=registrations&&shortcut;}catch(...){success=false;}
     RegCloseKey(key);return success;
 }

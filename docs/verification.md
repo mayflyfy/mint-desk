@@ -1,6 +1,6 @@
 # Verification
 
-Current release: v0.8.1, Windows x64. Results describe tested environments, not every machine.
+Current release: v0.8.2, Windows x64. Results describe tested environments, not every machine.
 
 ## Automated checks
 
@@ -12,19 +12,20 @@ Current release: v0.8.1, Windows x64. Results describe tested environments, not 
 | shell | Path validation, icon ownership, missing files |
 | snap | Screen/card alignment, cumulative one-pixel drag/resize escape, guide geometry, negative coordinates, DPI |
 | desktop_menu | Isolated registry registration, quoting, one dynamic action |
-| startup_integration | First-run defaults, manual opt-outs, retry, malformed preferences; isolated native shortcut creation, target refresh, identity/visibility preservation, collision protection |
+| startup_integration | First-run defaults, manual opt-outs, partial retry, enabled-entry path refresh; isolated native shortcut creation, identity/visibility preservation, collision protection |
 | alpha_surface | Background transparency with opaque foreground content |
 | desktop_items | Legacy recovery, collision handling, durable intent |
 | hidden_items | In-place visibility, occupied folders, identity, attribute restoration, corrupt/write-failed journals, watcher recovery |
 | file_helper | Narrow path/identity boundaries, no replacement, limited attribute changes |
 | dragdrop | OLE ownership, cancellation, drag-image cleanup, external-drop preparation |
-| ui | Cross-card/focus selection clearing, saved user-layout reopening, non-activating click-through guides, exact keyboard movement; title editing, collapse, menus, ordering, transfer, external-copy visibility |
+| ui | Desktop-host fallback, bypassed topmost requests, foreground-independent reorder repair, multi-card/glass ordering, coalesced repair quiescence; selection, layouts, guides, keyboard movement, editing, collapse, menus, transfer |
 
 Tests do not require real user files or installed third-party apps. Geometry and compositor checks depend on the Windows desktop session.
 
 ## Local observations
 
-- All eleven native suites passed for v0.8.1, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
+- All eleven native suites passed for v0.8.2, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
+- Layer tests use isolated native windows to request topmost status with WINDOWPOSCHANGING bypassed, reorder an ordinary window without changing foreground, promote a blur surface separately, and verify all cards return below the ordinary window. Missing/transient desktop anchors fall to HWND_BOTTOM; Explorer icon-view creation schedules repair. Queued repairs settle instead of continuously repositioning the same windows.
 - Renaming retains the old recovery directory when present, without moving/copying its journals. New installations use the MintDesk data directory. Cross-version singleton and mutation mutex identities remain compatible.
 - Synthetic items kept their original paths, identities, and bytes while hidden. Explorer desktop view removal was approximately 31–32 ms in a local sample. They remained hidden after refresh and reappeared on restoration.
 - Timing measures the desktop view collection, not mouse-to-screen latency or all systems.
@@ -33,8 +34,9 @@ Tests do not require real user files or installed third-party apps. Geometry and
 - A temporary child exited without cleanup; a separate watcher recovered synthetic fixture visibility. No user's normal instance was force-closed.
 - A temporary external copy retained original visibility instead of temporary organizer flags.
 - The EXE imports only Windows system DLLs; no extra runtime installation is needed.
-- The native v0.8.1 release EXE is 415 KiB (424,960 bytes). A short v0.8.1 UI sample used about 31.24 MiB working set and 8.89 MiB private memory, with no main-process CPU time increase over five idle seconds; the recovery watcher and optional permission helper are separate processes. These are observations, not minimum-resource guarantees.
-- A local in-place update retained the saved cards, file-reference order, appearance and lock preferences. Layout coordinates differed by at most one DIP due to monitor/DPI conversion. The real per-user desktop shortcut was created and its target verified.
+- The native v0.8.2 release EXE is 416 KiB (425,984 bytes). One short UI sample used 31.07 MiB working set and 9.34 MiB private memory, with 31.25 ms main-process CPU time over five idle seconds; the recovery watcher and optional permission helper are separate processes. These are observations, not minimum-resource guarantees.
+- A local in-place update retained desktop item identities, file hashes, visibility attributes, saved cards, file-reference order, appearance and lock preferences. Layout geometry was unchanged in this sample. Normal exit completed restoration and all helper processes ended.
+- A read-only live window-order check found the visible card and blur surfaces above Explorer's icon host and below the ordinary foreground application, with no surface marked topmost. It inspected window classes/order only and did not capture personal desktop content.
 - Outside-click dismissal installs its event-driven mouse hook only while an item is selected, forwards all input unchanged, defers menu dismissal until its command completes, and removes the hook when selection clears. Regression coverage includes desktop clicks without a foreground change.
 - The Windows CI workflow builds all eleven suites, packages the portable executable, and audits source and release contents.
 

@@ -39,8 +39,12 @@ foreach($file in $files){
 if($IncludeArtifacts){
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $release=Join-Path $root 'release';$exe=Join-Path $release 'MintDesk.exe'
+    $versionMatch=[regex]::Match([IO.File]::ReadAllText((Join-Path $root 'CMakeLists.txt')),'project\(MintDesk VERSION ([0-9]+\.[0-9]+\.[0-9]+)')
+    if(-not $versionMatch.Success){throw 'Cannot determine the current release version.'}
+    $version=$versionMatch.Groups[1].Value
+    if((Get-Item -LiteralPath $exe).VersionInfo.FileVersion -ne $version){throw 'Standalone executable version does not match this release.'}
     $bytes=[IO.File]::ReadAllBytes($exe);CheckText ([Text.Encoding]::ASCII.GetString($bytes)) 'release executable';CheckText ([Text.Encoding]::Unicode.GetString($bytes)) 'release executable'
-    foreach($zip in @(Get-ChildItem -LiteralPath $release -Filter '*-windows-x64.zip' -File)){
+    foreach($zip in @(Get-Item -LiteralPath (Join-Path $release ("MintDesk-v$version-windows-x64.zip")))){
         $archive=[IO.Compression.ZipFile]::OpenRead($zip.FullName)
         try{$entries=@($archive.Entries|Where-Object Name);$expected=@('MintDesk.exe','LICENSE','README.txt')
             if($entries.Count -ne 3){throw 'Portable ZIP must contain exactly three files.'}

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="0.8.1.0" processorArchitecture="amd64" name="MintDesk.Desktop" type="win32"/>
+  <assemblyIdentity version="0.8.2.0" processorArchitecture="amd64" name="MintDesk.Desktop" type="win32"/>
   <description>薄荷桌面助手 / MintDesk</description>
   <dependency>
     <dependentAssembly>

@@ -7,9 +7,11 @@
 namespace {
 int failures=0;
 void Check(bool condition,const char* text){if(!condition){std::fprintf(stderr,"FAIL: %s\n",text);++failures;}}
-struct Calls {int start=0,menu=0;bool startOk=true,menuOk=true,startEnabled=false,menuEnabled=false;};
+struct Calls {int start=0,menu=0;bool startOk=true,menuOk=true,startEnabled=false,menuEnabled=false,startStale=false,menuStale=false;};
 bool Start(void* context,bool enabled){auto& c=*static_cast<Calls*>(context);++c.start;if(c.startOk)c.startEnabled=enabled;return c.startOk;}
 bool Menu(void* context,bool enabled){auto& c=*static_cast<Calls*>(context);++c.menu;if(c.menuOk)c.menuEnabled=enabled;return c.menuOk;}
+bool StartStale(void* context){return static_cast<Calls*>(context)->startStale;}
+bool MenuStale(void* context){return static_cast<Calls*>(context)->menuStale;}
 bool ShortcutTarget(const std::wstring& path,const std::wstring& expected) {
     IShellLinkW* link=nullptr;IPersistFile* file=nullptr;bool okay=false;
     if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_IShellLinkW,reinterpret_cast<void**>(&link))) &&
@@ -76,6 +78,13 @@ int main() {
     calls.startEnabled=false;calls.menuEnabled=false;
     Check(desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start==1&&calls.menu==1&&!calls.startEnabled&&!calls.menuEnabled,
         "later launches preserve manual opt-outs instead of re-enabling them");
+    callbacks.autostartNeedsRefresh=StartStale;callbacks.desktopMenuNeedsRefresh=MenuStale;
+    calls.startStale=true;calls.menuStale=true;
+    Check(desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start==2&&calls.menu==2&&calls.startEnabled&&calls.menuEnabled,
+        "launching an executable in a new directory refreshes existing enabled integrations");
+    calls.startStale=false;calls.menuStale=false;calls.startEnabled=false;calls.menuEnabled=false;
+    Check(desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start==2&&calls.menu==2&&!calls.startEnabled&&!calls.menuEnabled,
+        "path refresh does not recreate manually removed integration entries");
     RegDeleteValueW(key,L"InitialIntegrationV1");calls={};calls.menuOk=false;
     Check(!desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start==1&&calls.menu==1,"partial setup reports failure");
     calls.startEnabled=false;calls.menuOk=true;

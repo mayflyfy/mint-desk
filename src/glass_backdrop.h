@@ -6,6 +6,7 @@
 #include <windows.h>
 
 namespace desk {
+constexpr UINT kBackdropOrderChanged=WM_APP+32;
 
 // A native, ownerless blur-only window, immediately behind the card's existing
 // per-pixel-alpha foreground. No timer, capture, shell hook, or renderer thread.
@@ -32,6 +33,7 @@ private:
     bool requested_ = false;
     bool accepted_ = false;
     bool visible_ = false;
+    bool syncing_ = false;
 };
 
 } // namespace desk

@@ -946,7 +946,24 @@ void CALLBACK DismissLayerTestMenu(HWND window, UINT, UINT_PTR timer, DWORD) {
     EndMenu();
 }
 
+void PumpLayerRepairs(DWORD duration=150) {
+    const ULONGLONG deadline=GetTickCount64()+duration;
+    do {
+        MSG message{};unsigned budget=0;
+        while(budget++<2000&&PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
+            if(message.message!=WM_QUIT){TranslateMessage(&message);DispatchMessageW(&message);}
+        }
+        Sleep(1);
+    }while(GetTickCount64()<deadline);
+}
+
 void TestDesktopLayerAndKeyboard(const Fixture& fixture) {
+    CheckUi(DesktopAnchorFor(nullptr)==HWND_BOTTOM,
+        "missing desktop host falls to the actual bottom instead of front of normal windows");
+    HWND fakeHost=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"isolated desktop transition fixture",WS_POPUP,
+        -30000,-30000,20,20,nullptr,nullptr,app.instance,nullptr);
+    if(fakeHost){SetWindowPos(fakeHost,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        CheckUi(DesktopAnchorFor(fakeHost)==HWND_BOTTOM,"topmost/empty predecessor uses a safe bottom fallback");DestroyWindow(fakeHost);}
     const HWND desktop = DesktopIconHost();
     CheckUi(desktop && FindWindowExW(desktop, nullptr, L"SHELLDLL_DefView", nullptr),
         "desktop band is anchored to Explorer's actual icon host rather than a wallpaper WorkerW");
@@ -1043,6 +1060,36 @@ void TestDesktopLayerAndKeyboard(const Fixture& fixture) {
         HandleCommand(nullptr, ShowCards);
         CheckDesktopBand(*card, ordinary, desktop,
             "the desktop Open/ShowCards command preserves the desktop band");
+        SetWindowPos(card->hwnd,HWND_TOPMOST,0,0,0,0,
+            SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOSENDCHANGING);
+        PumpLayerRepairs();
+        CheckDesktopBand(*card,ordinary,desktop,"post-change repair also handles promotion that bypasses WINDOWPOSCHANGING");
+
+        desk::CardState peerState;peerState.id=app.nextId++;peerState.title=L"second layer fixture";
+        Card* peer=CreateCard(std::move(peerState));
+        if(peer){PositionForTest(*peer,{outsideX+400,outsideY+30,outsideX+740,outsideY+350});ShowWindow(peer->hwnd,SW_SHOWNOACTIVATE);PlaceAtDesktop(peer->hwnd);}
+        PumpLayerRepairs();
+        const HWND foreground=GetForegroundWindow();
+        SetWindowPos(ordinary,card->hwnd,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        PumpLayerRepairs();
+        CheckUi(app.layerHook!=nullptr,"event-driven structural layer hook is registered");
+        CheckDesktopBand(*card,ordinary,desktop,"reordering another window without changing foreground repairs the affected card");
+        if(peer)CheckDesktopBand(*peer,ordinary,desktop,"a structural repair maintains all cards, not only the active card");
+        CheckUi(GetForegroundWindow()==foreground,"layer repair does not steal foreground focus");
+        const HWND backdrop=card->glass.Window();
+        if(backdrop&&IsWindowVisible(backdrop)){
+            SetWindowPos(backdrop,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOSENDCHANGING);
+            PumpLayerRepairs();
+            CheckDesktopBand(*card,ordinary,desktop,"a separately promoted blur surface returns behind its card");
+            CheckUi(!(GetWindowLongPtrW(backdrop,GWL_EXSTYLE)&WS_EX_TOPMOST),"blur surface loses stale topmost status");
+        }
+        RequestDesktopRepair();RequestDesktopRepair();RequestDesktopRepair();
+        PumpLayerRepairs(250);
+        CheckUi(!app.lowerPending,"coalesced event-driven layer repairs settle without continuous message polling");
+        DesktopStructureChanged(nullptr,EVENT_OBJECT_SHOW,FindWindowExW(desktop,nullptr,L"SHELLDLL_DefView",nullptr),OBJID_WINDOW,CHILDID_SELF,0,0);
+        CheckUi(app.lowerPending,"recreated Explorer child icon view also schedules reattachment");
+        PumpLayerRepairs();
+        if(peer)HandleCommand(peer,RemoveCard);
         for (auto& existing : app.cards) ShowWindow(existing->hwnd, SW_HIDE);
         HandleCommand(card, RemoveCard);
     }
@@ -1666,6 +1713,7 @@ void TestCloseRestoreFailureKeepsInstance(const Fixture& fixture) {
             const size_t cardCount = app.cards.size();
             const HWND cardWindow = card->hwnd;
             const HWINEVENTHOOK foregroundHook = app.foregroundHook;
+            const HWINEVENTHOOK layerHook = app.layerHook;
             const bool trayAdded = app.trayAdded;
             const unsigned beforeSaves = uiTestSaveCalls, beforeRefreshes = uiTestMenuRefreshCalls;
             uiTestStateDirectory = stateDirectory;
@@ -1677,7 +1725,7 @@ void TestCloseRestoreFailureKeepsInstance(const Fixture& fixture) {
                 IsWindow(cardWindow) && app.cards.size() == cardCount;
             CheckUi(retained && !app.quitting && !app.pendingQuit && !app.desktopReady,
                 "failed desktop restoration cancels normal shutdown and gates further desktop acquisition");
-            CheckUi(app.foregroundHook == foregroundHook && app.trayAdded == trayAdded &&
+            CheckUi(app.foregroundHook == foregroundHook && app.layerHook==layerHook && app.trayAdded == trayAdded &&
                 app.worker && WaitForSingleObject(app.worker->thread, 0) == WAIT_TIMEOUT,
                 "failed close retains foreground/tray lifecycle and restarts the usable icon worker");
             desk::AppState saved;

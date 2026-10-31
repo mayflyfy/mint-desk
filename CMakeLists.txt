@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(MintDesk VERSION 0.8.1 LANGUAGES CXX RC)
+project(MintDesk VERSION 0.8.2 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "MintDesk builds for Windows only.")

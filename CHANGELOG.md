@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2 — 2026-10-31
+
+- Repair card and blur-window order after structural window changes, including events that leave foreground focus unchanged.
+- Use the actual bottom as the safe fallback during Explorer host transitions; include same-process foreground changes and coalesce repairs without a periodic timer.
+- Keep repair operations idempotent so blur synchronization cannot cause a continuous reorder loop.
+- Refresh existing enabled autostart and desktop-menu paths after moving the executable; preserve manually disabled integrations.
+- Document in-place updates and the desktop shortcut's dependency on the original executable.
+
 ## 0.8.1 — 2026-10-25
 
 - Clear item selection when clicking another card or leaving the application.

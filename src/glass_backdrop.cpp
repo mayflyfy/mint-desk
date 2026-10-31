@@ -115,8 +115,16 @@ void GlassBackdrop::Sync(const RECT& rect, bool visible) {
     if (!IsWindow(window_) || !IsWindow(card_)) return;
     const bool show = visible && requested_ && accepted_ && IsWindowVisible(card_) && !IsIconic(card_);
     if (!show) { ShowWindow(window_, SW_HIDE); return; }
+    RECT current{};
+    const bool topmost=(GetWindowLongPtrW(window_,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;
+    if(!topmost&&IsWindowVisible(window_)&&GetWindow(card_,GW_HWNDNEXT)==window_&&
+        GetWindowRect(window_,&current)&&EqualRect(&current,&rect))return;
+    syncing_=true;
+    if(topmost)SetWindowPos(window_,HWND_BOTTOM,0,0,0,0,
+        SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOSENDCHANGING);
     SetWindowPos(window_, card_, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
         SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+    syncing_=false;
 }
 
 void GlassBackdrop::Destroy() {
@@ -124,6 +132,7 @@ void GlassBackdrop::Destroy() {
     window_ = nullptr;
     card_ = nullptr;
     requested_ = accepted_ = visible_ = false;
+    syncing_=false;
     if (IsWindow(window)) DestroyWindow(window);
 }
 
@@ -155,6 +164,12 @@ LRESULT CALLBACK GlassBackdrop::WindowProc(HWND window, UINT message, WPARAM wp,
             position->flags |= SWP_NOACTIVATE;
         }
         return 0;
+    case WM_WINDOWPOSCHANGED:
+        if(self&&!self->syncing_&&IsWindowVisible(window)&&IsWindow(self->card_)&&
+            ((GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)||
+                GetWindow(self->card_,GW_HWNDNEXT)!=window||!IsWindowVisible(self->card_)))
+            PostMessageW(self->card_,kBackdropOrderChanged,0,0);
+        break;
     case WM_DWMCOMPOSITIONCHANGED:
     case WM_SETTINGCHANGE:
     case WM_POWERBROADCAST:

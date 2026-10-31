@@ -112,6 +112,8 @@ struct Application {
     HICON icon = nullptr;
     HANDLE singleton = nullptr;
     HWINEVENTHOOK foregroundHook = nullptr;
+    HWINEVENTHOOK layerHook = nullptr;
+    bool lowerPending = false;
     HHOOK selectionHook = nullptr;
     HWND pendingSelectionWindow = nullptr;
     bool pendingSelectionClick = false;
@@ -131,6 +133,11 @@ struct Application {
     bool dragHandledInside = false;
     int exitCode = 0;
 } app;
+
+void RequestDesktopRepair() {
+    if(app.controller&&!app.quitting&&!app.lowerPending)
+        app.lowerPending=PostMessageW(app.controller,kLower,0,0)!=FALSE;
+}
 
 int Dip(const Card& card, int value) { return MulDiv(value, card.dpi, 96); }
 int Width(const RECT& r) { return r.right - r.left; }
@@ -293,24 +300,29 @@ HWND DesktopIconHost() {
     return search.host;
 }
 
-bool DesktopAnchor(HWND& anchor) {
-    const HWND desktop=DesktopIconHost();
-    if (!desktop) return false;
-    anchor=GetWindow(desktop,GW_HWNDPREV);
+HWND DesktopAnchorFor(HWND desktop) {
+    if(!IsWindow(desktop))return HWND_BOTTOM;
+    HWND anchor=GetWindow(desktop,GW_HWNDPREV);
     // Keep all our foreground/background surfaces in one band directly above
     // the desktop, preserving ordinary windows even when they share our PID.
     while (anchor&&DesktopSurface(anchor)) anchor=GetWindow(anchor,GW_HWNDPREV);
-    if (!anchor||(GetWindowLongPtrW(anchor,GWL_EXSTYLE)&WS_EX_TOPMOST))
-        anchor=HWND_NOTOPMOST;
-    return true;
+    // HWND_NOTOPMOST would promote to the front of the normal-window group.
+    // During Explorer transitions, temporarily stay at the actual bottom.
+    if (!anchor||(GetWindowLongPtrW(anchor,GWL_EXSTYLE)&WS_EX_TOPMOST))return HWND_BOTTOM;
+    return anchor;
+}
+
+bool DesktopAnchor(HWND& anchor) {
+    anchor=DesktopAnchorFor(DesktopIconHost());
+    return anchor!=HWND_BOTTOM;
 }
 
 void PlaceAtDesktop(HWND window, const RECT* rect = nullptr) {
-    HWND anchor=nullptr;
-    const bool anchored=DesktopAnchor(anchor);
+    HWND anchor=HWND_BOTTOM;
+    DesktopAnchor(anchor);
     SetWindowPos(window, anchor, rect ? rect->left : 0, rect ? rect->top : 0,
         rect ? Width(*rect) : 0, rect ? Height(*rect) : 0,
-        SWP_NOACTIVATE | (rect ? 0 : SWP_NOMOVE|SWP_NOSIZE) | (anchored?0:SWP_NOZORDER));
+        SWP_NOACTIVATE | SWP_NOOWNERZORDER | (rect ? 0 : SWP_NOMOVE|SWP_NOSIZE));
 }
 
 void FocusCard(Card& card,HWND target) {
@@ -325,14 +337,21 @@ void FocusCard(Card& card,HWND target) {
 void EnforceDesktopBand(Card& card) {
     if (card.arrangingZ||!card.hwnd) return;
     const HWND desktop=DesktopIconHost();
-    if (!desktop) return;
+    const HWND anchor=DesktopAnchorFor(desktop);
     // Check from the desktop upward: the card is already in its band if no
     // ordinary window separates it from the icon host. Most geometry changes
     // therefore need no additional SetWindowPos call.
     bool inBand=false;
-    for (HWND window=GetWindow(desktop,GW_HWNDPREV);window;window=GetWindow(window,GW_HWNDPREV)) {
-        if (window==card.hwnd) { inBand=true; break; }
-        if (!DesktopSurface(window)) break;
+    if(anchor==HWND_BOTTOM) {
+        inBand=true;
+        unsigned checked=0;
+        for(HWND window=GetWindow(card.hwnd,GW_HWNDNEXT);window;window=GetWindow(window,GW_HWNDNEXT))
+            if(!DesktopSurface(window)||++checked>8192){inBand=false;break;}
+    } else {
+        for (HWND window=GetWindow(desktop,GW_HWNDPREV);window;window=GetWindow(window,GW_HWNDPREV)) {
+            if (window==card.hwnd) { inBand=true; break; }
+            if (!DesktopSurface(window)) break;
+        }
     }
     if (inBand&&!(GetWindowLongPtrW(card.hwnd,GWL_EXSTYLE)&WS_EX_TOPMOST)) return;
     // Some activation APIs apply a final promotion after WINDOWPOSCHANGING.
@@ -1274,6 +1293,7 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: Paint(c); return 0;
     case WM_WINDOWPOSCHANGED: EnforceDesktopBand(c); SyncBackdrop(c); break;
+    case desk::kBackdropOrderChanged: RequestDesktopRepair(); return 0;
     case WM_SHOWWINDOW: SyncBackdrop(c,wp?1:0); break;
     case WM_DWMCOMPOSITIONCHANGED: case WM_THEMECHANGED:
         c.glass.Apply(app.opacity!=255); SyncBackdrop(c); Invalidate(c); break;
@@ -1282,10 +1302,9 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     case WM_WINDOWPOSCHANGING: {
         auto* position=reinterpret_cast<WINDOWPOS*>(lp);
         if (position&&!(position->flags&SWP_NOZORDER)) {
-            HWND anchor=nullptr;
-            if (DesktopAnchor(anchor)) position->hwndInsertAfter=anchor;
-            else position->flags|=SWP_NOZORDER;
-            position->flags|=SWP_NOACTIVATE;
+            HWND anchor=HWND_BOTTOM;DesktopAnchor(anchor);
+            position->hwndInsertAfter=anchor;
+            position->flags|=SWP_NOACTIVATE|SWP_NOOWNERZORDER;
         }
         // Keep DefWindowProc's native min/max handling during move/resize.
         break;
@@ -1513,7 +1532,7 @@ LRESULT CardMessage(Card& c, HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wp)==WA_INACTIVE && !app.modalDepth) ClearSelection(c);
-        PostMessageW(app.controller,kLower,0,0); return 0;
+        RequestDesktopRepair(); return 0;
     case WM_ACTIVATEAPP:
         if (!wp && !app.modalDepth) ClearSelections();
         return 0;
@@ -1590,12 +1609,23 @@ bool Tray(DWORD action) {
 void LowerCards() {
     // Activation and foreground events both enforce the band, including while
     // a title editor or one of our menus temporarily owns keyboard focus.
-    for (auto& c:app.cards) if (c->hwnd)
-        PlaceAtDesktop(c->hwnd);
+    for (auto& c:app.cards) if (c->hwnd)EnforceDesktopBand(*c);
+    for (auto& c:app.cards) if (c->hwnd)SyncBackdrop(*c);
 }
 
 void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
-    if (app.controller && !app.quitting) PostMessageW(app.controller,kLower,0,0);
+    RequestDesktopRepair();
+}
+
+void CALLBACK DesktopStructureChanged(HWINEVENTHOOK,DWORD event,HWND window,LONG object,LONG child,DWORD,DWORD) {
+    if(child!=CHILDID_SELF)return;
+    const bool desktop=window==GetDesktopWindow()&&(object==OBJID_WINDOW||object==OBJID_CLIENT);
+    const bool topLevel=object==OBJID_WINDOW&&
+        ((window&&GetAncestor(window,GA_ROOT)==window)||event==EVENT_OBJECT_DESTROY);
+    wchar_t name[64]{};
+    const bool iconView=object==OBJID_WINDOW&&window&&GetClassNameW(window,name,ARRAYSIZE(name))&&
+        !wcscmp(name,L"SHELLDLL_DefView");
+    if(desktop||topLevel||iconView)RequestDesktopRepair();
 }
 
 void ReflowDisplays() {
@@ -1610,7 +1640,10 @@ void ReflowDisplays() {
 }
 
 LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
-    if (message==app.taskbarCreated && !app.preview) { app.trayAdded=Tray(NIM_ADD); return 0; }
+    if (message==app.taskbarCreated) {
+        if(!app.preview)app.trayAdded=Tray(NIM_ADD);
+        RequestDesktopRepair();return 0;
+    }
     switch (message) {
     case kVisual: {
         std::unique_ptr<VisualResult> result(reinterpret_cast<VisualResult*>(lp));
@@ -1634,6 +1667,7 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case kLower:
+        app.lowerPending=false;
         if (!app.modalDepth && !CardInputWindow(GetForegroundWindow())) ClearSelections();
         LowerCards(); return 0;
     case kSelectionClick:
@@ -1678,6 +1712,7 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
             app.exitCode=2;
         }
         if (app.foregroundHook) { UnhookWinEvent(app.foregroundHook); app.foregroundHook=nullptr; }
+        if (app.layerHook) { UnhookWinEvent(app.layerHook); app.layerHook=nullptr; }
         if (app.selectionHook) { UnhookWindowsHookEx(app.selectionHook); app.selectionHook=nullptr; }
         for (HWND& guide : app.snapGuides) if (guide) { DestroyWindow(guide); guide=nullptr; }
         if (app.trayAdded) Tray(NIM_DELETE);
@@ -1773,7 +1808,9 @@ bool Initialize(HINSTANCE instance) {
             for(auto& c:app.cards)Notify(*c,L"桌面快捷方式、自启动或右键未完成配置，请检查目录权限和托盘设置");
     }
     if (!app.preview) desk::RefreshDesktopMenu(true);
-    app.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,ForegroundChanged,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    app.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,ForegroundChanged,0,0,WINEVENT_OUTOFCONTEXT);
+    app.layerHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_REORDER,nullptr,DesktopStructureChanged,0,0,WINEVENT_OUTOFCONTEXT);
+    RequestDesktopRepair();
     Dirty(); return true;
 }
 } // namespace
