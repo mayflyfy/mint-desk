@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(MintDesk VERSION 0.8.2 LANGUAGES CXX RC)
+project(MintDesk VERSION 0.9.0 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "MintDesk builds for Windows only.")
@@ -19,6 +19,7 @@ add_executable(MintDesk WIN32
     src/desktop_items.cpp
     src/hidden_items.cpp
     src/startup_integration.cpp
+    src/install_support.cpp
     src/glass_backdrop.cpp
     src/file_helper.cpp
     src/app.rc

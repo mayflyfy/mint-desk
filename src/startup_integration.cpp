@@ -8,8 +8,22 @@ namespace desk {
 namespace {
 constexpr wchar_t kPreferences[]=L"Software\\MCC\\MintDesk";
 constexpr wchar_t kCompleted[]=L"InitialIntegrationV1";
+constexpr wchar_t kDesktopShortcut[]=L"DesktopShortcutEnabled";
+constexpr wchar_t kAutoUpdate[]=L"AutoCheckUpdates";
+bool ReadBool(HKEY key,const wchar_t* name,bool fallback,bool& value) {
+    DWORD number=0,type=0,size=sizeof(number);
+    const LONG result=RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(&number),&size);
+    if(result==ERROR_FILE_NOT_FOUND){value=fallback;return true;}
+    if(result!=ERROR_SUCCESS||type!=REG_DWORD||size!=sizeof(number)||number>1)return false;
+    value=number!=0;return true;
+}
+bool WriteNumber(HKEY key,const wchar_t* name,DWORD value) {
+    return RegSetValueExW(key,name,0,REG_DWORD,reinterpret_cast<const BYTE*>(&value),sizeof(value))==ERROR_SUCCESS;
+}
 bool Configure(HKEY key,const testing::IntegrationCallbacks& callbacks) {
     if(!key||!callbacks.autostart||!callbacks.desktopMenu)return false;
+    bool shortcut=true;
+    if(!ReadBool(key,kDesktopShortcut,true,shortcut))return false;
     DWORD completed=0,type=0,size=sizeof(completed);
     const LONG read=RegQueryValueExW(key,kCompleted,nullptr,&type,reinterpret_cast<BYTE*>(&completed),&size);
     if(read!=ERROR_FILE_NOT_FOUND&&(read!=ERROR_SUCCESS||type!=REG_DWORD||size!=sizeof(completed)||(completed&~3u)))return false;
@@ -27,7 +41,19 @@ bool Configure(HKEY key,const testing::IntegrationCallbacks& callbacks) {
     } else if(callbacks.desktopMenuNeedsRefresh&&callbacks.desktopMenuNeedsRefresh(callbacks.context)) {
         if(!callbacks.desktopMenu(callbacks.context,true))success=false;
     }
+    if(callbacks.desktopShortcut&&!callbacks.desktopShortcut(callbacks.context,shortcut))success=false;
     return success;
+}
+bool Apply(HKEY key,const InstallOptions& options,const testing::IntegrationCallbacks& callbacks) {
+    if(!key||!callbacks.autostart||!callbacks.desktopMenu||!callbacks.desktopShortcut)return false;
+    // Persist explicit choices before applying them so a later normal launch
+    // cannot replace an installer's opt-out with the portable first-run defaults.
+    if(!WriteNumber(key,kDesktopShortcut,options.desktopShortcut)||
+        !WriteNumber(key,kAutoUpdate,options.autoCheckUpdates)||!WriteNumber(key,kCompleted,3))return false;
+    const bool shortcut=callbacks.desktopShortcut(callbacks.context,options.desktopShortcut);
+    const bool startup=callbacks.autostart(callbacks.context,options.autostart);
+    const bool menu=callbacks.desktopMenu(callbacks.context,options.desktopMenu);
+    return shortcut&&startup&&menu;
 }
 bool Autostart(void*,bool enabled){return SetAutostart(enabled);}
 bool DesktopMenu(void*,bool enabled){return SetDesktopMenu(enabled);}
@@ -48,7 +74,7 @@ template<class T> struct Com {
     ~Com(){if(value)value->Release();}
 };
 constexpr wchar_t kShortcutDescription[]=L"薄荷桌面助手 / MintDesk";
-bool ShortcutAt(const std::wstring& desktop,const std::wstring& executable) {
+bool ShortcutAt(const std::wstring& desktop,const std::wstring& executable,bool enabled=true,bool matchingTargetOnly=false) {
     if(desktop.empty()||executable.empty())return false;
     Com<IShellLinkW> desired;
     if(FAILED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_IShellLinkW,
@@ -75,9 +101,17 @@ bool ShortcutAt(const std::wstring& desktop,const std::wstring& executable) {
                 FAILED(existing.value->GetDescription(description,ARRAYSIZE(description))) ||
                 FAILED(existing.value->GetArguments(arguments,ARRAYSIZE(arguments))))continue;
             const bool ours=!wcscmp(description,kShortcutDescription);
+            if(!enabled) {
+                if(ours&&(!matchingTargetOnly||!_wcsicmp(target,executable.c_str()))) {
+                    if(!DeleteFileW(path.c_str()))return false;
+                    SHChangeNotify(SHCNE_DELETE,SHCNF_PATHW|SHCNF_FLUSHNOWAIT,path.c_str(),nullptr);
+                }
+                continue;
+            }
             if(!_wcsicmp(target,executable.c_str()) && (!ours || !wcscmp(arguments,L"/show")))return true;
             if(!ours)continue; // Never replace another application's or user's shortcut.
         }
+        if(!enabled)continue;
         // Serialize in memory. Updating our existing shortcut in place keeps
         // its file identity and Hidden/System flags if it was put in a card.
         Com<IPersistStream> persistent;Com<IStream> stream;
@@ -100,25 +134,49 @@ bool ShortcutAt(const std::wstring& desktop,const std::wstring& executable) {
         if(success)SHChangeNotify(exists?SHCNE_UPDATEITEM:SHCNE_CREATE,SHCNF_PATHW|SHCNF_FLUSHNOWAIT,path.c_str(),nullptr);
         return success;
     }
-    return false;
+    return !enabled;
 }
-bool DesktopShortcut() {
+bool DesktopShortcut(void*,bool enabled) {
     PWSTR desktop=nullptr;
     if(FAILED(SHGetKnownFolderPath(FOLDERID_Desktop,0,nullptr,&desktop)))return false;
     const std::wstring directory=desktop;CoTaskMemFree(desktop);
-    return ShortcutAt(directory,ExecutablePath());
+    return ShortcutAt(directory,ExecutablePath(),enabled);
 }
+testing::IntegrationCallbacks Callbacks(){return {nullptr,Autostart,DesktopMenu,AutostartNeedsRefresh,DesktopMenuNeedsRefresh,DesktopShortcut};}
 }
 bool EnsureDefaultIntegrations() {
     HKEY key=nullptr;
     if(RegCreateKeyExW(HKEY_CURRENT_USER,kPreferences,0,nullptr,0,KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
     bool success=false;
-    try{const bool registrations=Configure(key,{nullptr,Autostart,DesktopMenu,AutostartNeedsRefresh,DesktopMenuNeedsRefresh});
-        const bool shortcut=DesktopShortcut();success=registrations&&shortcut;}catch(...){success=false;}
+    try{success=Configure(key,Callbacks());}catch(...){success=false;}
     RegCloseKey(key);return success;
+}
+bool ApplyInstallOptions(const InstallOptions& options) {
+    HKEY key=nullptr;
+    if(RegCreateKeyExW(HKEY_CURRENT_USER,kPreferences,0,nullptr,0,KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
+    bool success=false;
+    try{success=Apply(key,options,Callbacks());}catch(...){success=false;}
+    RegCloseKey(key);return success;
+}
+bool IsAutoCheckUpdatesEnabled() {
+    HKEY key=nullptr;bool value=false;
+    if(RegOpenKeyExW(HKEY_CURRENT_USER,kPreferences,0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)return false;
+    const bool okay=ReadBool(key,kAutoUpdate,false,value);RegCloseKey(key);return okay&&value;
+}
+bool RemoveInstalledIntegrations() {
+    bool okay=true;
+    // A stale copy must not remove entries that now point to another location.
+    if(IsAutostartEnabled()&&!SetAutostart(false))okay=false;
+    if(IsDesktopMenuRegistered()&&!SetDesktopMenu(false))okay=false;
+    PWSTR desktop=nullptr;
+    if(FAILED(SHGetKnownFolderPath(FOLDERID_Desktop,0,nullptr,&desktop)))return false;
+    try{if(!ShortcutAt(desktop,ExecutablePath(),false,true))okay=false;}catch(...){okay=false;}
+    CoTaskMemFree(desktop);return okay;
 }
 namespace testing {
 bool EnsureDefaultIntegrationsAtKey(HKEY key,const IntegrationCallbacks& callbacks){return Configure(key,callbacks);}
 bool EnsureDesktopShortcutAt(const std::wstring& desktop,const std::wstring& executable){return ShortcutAt(desktop,executable);}
+bool SetDesktopShortcutAt(const std::wstring& desktop,const std::wstring& executable,bool enabled,bool matchingTargetOnly){return ShortcutAt(desktop,executable,enabled,matchingTargetOnly);}
+bool ApplyInstallOptionsAtKey(HKEY key,const InstallOptions& options,const IntegrationCallbacks& callbacks){return Apply(key,options,callbacks);}
 }
 }

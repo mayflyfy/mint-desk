@@ -1,10 +1,10 @@
 # Verification
 
-Current release: v0.8.2, Windows x64. Results describe tested environments, not every machine.
+Current version: v0.9.0, Windows x64. Results describe tested environments, not every machine.
 
 ## Automated checks
 
-`tests/run-tests.ps1` builds eleven native suites with temporary fixtures:
+`tests/run-tests.ps1` builds twelve native suites with temporary fixtures:
 
 | Suite | Coverage |
 | --- | --- |
@@ -12,7 +12,8 @@ Current release: v0.8.2, Windows x64. Results describe tested environments, not 
 | shell | Path validation, icon ownership, missing files |
 | snap | Screen/card alignment, cumulative one-pixel drag/resize escape, guide geometry, negative coordinates, DPI |
 | desktop_menu | Isolated registry registration, quoting, one dynamic action |
-| startup_integration | First-run defaults, manual opt-outs, partial retry, enabled-entry path refresh; isolated native shortcut creation, identity/visibility preservation, collision protection |
+| startup_integration | First-run defaults, installer choices, persistent opt-outs, reserved update preference, partial retry, enabled-entry path refresh; isolated native shortcut creation, identity/visibility preservation, collision and ownership protection |
+| install_support | Normal shutdown of isolated controller processes, bounded waits, unfinished restoration never force-terminated |
 | alpha_surface | Background transparency with opaque foreground content |
 | desktop_items | Legacy recovery, collision handling, durable intent |
 | hidden_items | In-place visibility, occupied folders, identity, attribute restoration, corrupt/write-failed journals, watcher recovery |
@@ -22,9 +23,11 @@ Current release: v0.8.2, Windows x64. Results describe tested environments, not 
 
 Tests do not require real user files or installed third-party apps. Geometry and compositor checks depend on the Windows desktop session.
 
+`tests/installer_tests.ps1` builds a separate test installer and test-only payload, and exercises fresh installation defaults, explicit opt-outs, saved upgrade choices, v0.8.x portable preferences, directory selection, restoration failure blocking upgrade/uninstall, integration cleanup, and preservation of fictional desktop/data files. It uses isolated temporary folders and registry keys; it does not install over the user's actual application. Native suites independently test the production integration and shutdown code.
+
 ## Local observations
 
-- All eleven native suites passed for v0.8.2, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
+- All twelve native suites and the isolated installer lifecycle checks passed for v0.9.0, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
 - Layer tests use isolated native windows to request topmost status with WINDOWPOSCHANGING bypassed, reorder an ordinary window without changing foreground, promote a blur surface separately, and verify all cards return below the ordinary window. Missing/transient desktop anchors fall to HWND_BOTTOM; Explorer icon-view creation schedules repair. Queued repairs settle instead of continuously repositioning the same windows.
 - Renaming retains the old recovery directory when present, without moving/copying its journals. New installations use the MintDesk data directory. Cross-version singleton and mutation mutex identities remain compatible.
 - Synthetic items kept their original paths, identities, and bytes while hidden. Explorer desktop view removal was approximately 31–32 ms in a local sample. They remained hidden after refresh and reappeared on restoration.
@@ -38,7 +41,8 @@ Tests do not require real user files or installed third-party apps. Geometry and
 - A local in-place update retained desktop item identities, file hashes, visibility attributes, saved cards, file-reference order, appearance and lock preferences. Layout geometry was unchanged in this sample. Normal exit completed restoration and all helper processes ended.
 - A read-only live window-order check found the visible card and blur surfaces above Explorer's icon host and below the ordinary foreground application, with no surface marked topmost. It inspected window classes/order only and did not capture personal desktop content.
 - Outside-click dismissal installs its event-driven mouse hook only while an item is selected, forwards all input unchanged, defers menu dismissal until its command completes, and removes the hook when selection clears. Regression coverage includes desktop clicks without a foreground change.
-- The Windows CI workflow builds all eleven suites, packages the portable executable, and audits source and release contents.
+- The Windows CI workflow builds all twelve suites, tests the installer with isolated fixtures, packages both distributions, and audits source and release contents.
+- v0.9.0 adds a roughly 2.2 MB installer; its standalone app is 430,592 bytes. Inno Setup runs only during installation/uninstallation, and adds no background service or app runtime dependency. Automatic update checking is a stored preference with no network implementation in this version. This version has not been used to replace the user's live installation during development.
 
 ## Screenshot provenance
 

@@ -22,9 +22,17 @@ jobs:
       - name: Test native behavior
         shell: pwsh
         run: ./tests/run-tests.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe'
+      - name: Prepare installer compiler
+        shell: pwsh
+        run: |
+          $iscc = ./tools/get-inno.ps1
+          "MINTDESK_ISCC=$iscc" >> $env:GITHUB_ENV
+      - name: Test installer lifecycle with isolated fixtures
+        shell: pwsh
+        run: ./tests/installer_tests.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe' -Iscc $env:MINTDESK_ISCC
       - name: Build and package
         shell: pwsh
-        run: ./tools/package-release.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe'
+        run: ./tools/package-release.ps1 -Compiler '${{ steps.msys2.outputs.msys2-location }}/mingw64/bin/g++.exe' -Iscc $env:MINTDESK_ISCC
       - name: Audit source and portable bundle
         shell: pwsh
         run: ./tools/audit-release.ps1 -IncludeArtifacts
@@ -34,5 +42,6 @@ jobs:
           path: |
             release/MintDesk.exe
             release/*-windows-x64.zip
+            release/*-setup-x64.exe
             release/SHA256SUMS.txt
           if-no-files-found: error

@@ -2,7 +2,7 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=[IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$extensions=@('.cpp','.h','.rc','.manifest','.ps1','.md','.txt','.yml','.yaml','.ico','.png','.gitattributes','.gitignore')
+$extensions=@('.cpp','.h','.rc','.manifest','.ps1','.iss','.md','.txt','.yml','.yaml','.ico','.png','.gitattributes','.gitignore')
 $files=@()
 if(Test-Path -LiteralPath (Join-Path $root '.git')){
     $tracked=@(git -C $root ls-files --cached)
@@ -15,7 +15,7 @@ if(Test-Path -LiteralPath (Join-Path $root '.git')){
         $files+=Get-Item -LiteralPath $path
     }
 }else{
-    foreach($folder in @('src','assets','tests','tools','docs','.github')){$files+=@(Get-ChildItem -LiteralPath (Join-Path $root $folder) -Recurse -File)}
+    foreach($folder in @('src','assets','tests','tools','docs','installer','.github')){$files+=@(Get-ChildItem -LiteralPath (Join-Path $root $folder) -Recurse -File)}
     foreach($name in @('README.md','LICENSE','CHANGELOG.md','CONTRIBUTING.md','CMakeLists.txt','build.ps1','.gitignore','.gitattributes')){$files+=Get-Item -LiteralPath (Join-Path $root $name)}
 }
 $prefixes=@($root,$env:USERPROFILE)|Where-Object{$_}
@@ -44,6 +44,15 @@ if($IncludeArtifacts){
     $version=$versionMatch.Groups[1].Value
     if((Get-Item -LiteralPath $exe).VersionInfo.FileVersion -ne $version){throw 'Standalone executable version does not match this release.'}
     $bytes=[IO.File]::ReadAllBytes($exe);CheckText ([Text.Encoding]::ASCII.GetString($bytes)) 'release executable';CheckText ([Text.Encoding]::Unicode.GetString($bytes)) 'release executable'
+    $setup=Join-Path $release ("MintDesk-v$version-setup-x64.exe")
+    if((Get-Item -LiteralPath $setup).VersionInfo.ProductVersion.Trim() -ne $version){throw 'Installer version mismatch.'}
+    $setupBytes=[IO.File]::ReadAllBytes($setup);CheckText ([Text.Encoding]::ASCII.GetString($setupBytes)) 'installer';CheckText ([Text.Encoding]::Unicode.GetString($setupBytes)) 'installer'
+    $sumLines=@([IO.File]::ReadAllLines((Join-Path $release 'SHA256SUMS.txt')))
+    foreach($artifact in @($exe,$setup,(Join-Path $release ("MintDesk-v$version-windows-x64.zip")))){
+        $expected=(Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetFileName($artifact)
+        if($expected -notin $sumLines){throw 'Artifact checksum mismatch.'}
+    }
+    if($sumLines.Count -ne 3){throw 'Expected exactly three release checksums.'}
     foreach($zip in @(Get-Item -LiteralPath (Join-Path $release ("MintDesk-v$version-windows-x64.zip")))){
         $archive=[IO.Compression.ZipFile]::OpenRead($zip.FullName)
         try{$entries=@($archive.Entries|Where-Object Name);$expected=@('MintDesk.exe','LICENSE','README.txt')

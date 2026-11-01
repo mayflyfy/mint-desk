@@ -29,6 +29,7 @@
 #include "file_helper.h"
 #include "hidden_items.h"
 #include "startup_integration.h"
+#include "install_support.h"
 
 // MintDesk uses ordinary, bottom-positioned tool windows. It never reparents
 // Explorer/WorkerW windows or installs a shell hook. Per-file visibility is
@@ -1835,6 +1836,22 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         }
         LocalFree(arguments);return result;
     }
+    if(arguments&&argumentCount>=2&&!_wcsicmp(arguments[1],L"/configure-install")) {
+        desk::InstallOptions options;
+        bool valid=argumentCount==6;
+        for(int i=2;valid&&i<6;++i)valid=!wcscmp(arguments[i],L"0")||!wcscmp(arguments[i],L"1");
+        if(valid){options.desktopShortcut=arguments[2][0]==L'1';options.autostart=arguments[3][0]==L'1';
+            options.autoCheckUpdates=arguments[4][0]==L'1';options.desktopMenu=arguments[5][0]==L'1';}
+        LocalFree(arguments);if(!valid)return 1;
+        const HRESULT com=OleInitialize(nullptr);if(FAILED(com))return 1;
+        const bool okay=desk::ApplyInstallOptions(options);OleUninitialize();return okay?0:1;
+    }
+    if(arguments&&argumentCount==2&&!_wcsicmp(arguments[1],L"/uninstall-integrations")) {
+        LocalFree(arguments);const HRESULT com=OleInitialize(nullptr);if(FAILED(com))return 1;
+        const bool okay=desk::RemoveInstalledIntegrations();OleUninitialize();return okay?0:1;
+    }
+    const bool maintenanceRequest=arguments&&argumentCount==2&&!_wcsicmp(arguments[1],L"/prepare-install");
+    if(maintenanceRequest&&!desk::CloseForMaintenance()){LocalFree(arguments);return 3;}
     bool exitRequest=false,toggleRequest=false,restoreRequest=false;
     int menuRegistration=0;
     if (arguments) {
@@ -1857,7 +1874,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     }
     const HRESULT com=OleInitialize(nullptr);
     if (FAILED(com)) return 1;
-    if (restoreRequest) {
+    if (restoreRequest||maintenanceRequest) {
         if (app.preview) { OleUninitialize(); return 1; }
         HANDLE restoreSingleton=CreateMutexW(nullptr,FALSE,L"Local\\DeskCards.Instance.1");
         const DWORD mutexError=GetLastError();

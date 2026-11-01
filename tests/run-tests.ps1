@@ -45,12 +45,13 @@ try {
         @{ Name = 'snap_tests'; Sources = @('tests\snap_tests.cpp', 'src\snap.cpp'); Extra = @() },
         @{ Name = 'desktop_menu_tests'; Sources = @('tests\desktop_menu_tests.cpp', 'src\desktop_menu.cpp', 'src\state.cpp'); Extra = @() },
         @{ Name = 'startup_integration_tests'; Sources = @('tests\startup_integration_tests.cpp', 'src\startup_integration.cpp', 'src\desktop_menu.cpp', 'src\state.cpp'); Extra = @() },
+        @{ Name = 'install_support_tests'; Sources = @('tests\install_support_tests.cpp', 'src\install_support.cpp'); Extra = @('-municode') },
         @{ Name = 'alpha_surface_tests'; Sources = @('tests\alpha_surface_tests.cpp', 'src\alpha_surface.cpp'); Extra = @() },
         @{ Name = 'desktop_items_tests'; Sources = @('tests\desktop_items_tests.cpp', 'src\desktop_items.cpp', 'src\hidden_items.cpp', 'src\state.cpp', 'src\file_helper.cpp'); Extra = @() },
         @{ Name = 'hidden_items_tests'; Sources = @('tests\hidden_items_tests.cpp', 'src\hidden_items.cpp', 'src\state.cpp', 'src\file_helper.cpp'); Extra = @() },
         @{ Name = 'file_helper_tests'; Sources = @('tests\file_helper_tests.cpp', 'src\file_helper.cpp', 'src\state.cpp'); Extra = @() },
         @{ Name = 'dragdrop_tests'; Sources = @('tests\dragdrop_tests.cpp', 'src\dragdrop.cpp', 'src\shell_items.cpp'); Extra = @() },
-        @{ Name = 'ui_tests'; Sources = @('tests\ui_tests.cpp', 'src\state.cpp', 'src\shell_items.cpp', 'src\snap.cpp', 'src\desktop_menu.cpp', 'src\startup_integration.cpp', 'src\dragdrop.cpp', 'src\alpha_surface.cpp', 'src\desktop_items.cpp', 'src\hidden_items.cpp', 'src\glass_backdrop.cpp', 'src\file_helper.cpp'); Extra = @('-municode') }
+        @{ Name = 'ui_tests'; Sources = @('tests\ui_tests.cpp', 'src\state.cpp', 'src\shell_items.cpp', 'src\snap.cpp', 'src\desktop_menu.cpp', 'src\startup_integration.cpp', 'src\install_support.cpp', 'src\dragdrop.cpp', 'src\alpha_surface.cpp', 'src\desktop_items.cpp', 'src\hidden_items.cpp', 'src\glass_backdrop.cpp', 'src\file_helper.cpp'); Extra = @('-municode') }
     )
     foreach ($case in $cases) {
         $executable = Join-Path $outputDirectory ($case.Name + '.exe')

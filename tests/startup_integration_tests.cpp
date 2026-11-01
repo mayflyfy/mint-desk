@@ -7,11 +7,12 @@
 namespace {
 int failures=0;
 void Check(bool condition,const char* text){if(!condition){std::fprintf(stderr,"FAIL: %s\n",text);++failures;}}
-struct Calls {int start=0,menu=0;bool startOk=true,menuOk=true,startEnabled=false,menuEnabled=false,startStale=false,menuStale=false;};
+struct Calls {int start=0,menu=0,shortcut=0;bool startOk=true,menuOk=true,shortcutOk=true,startEnabled=false,menuEnabled=false,shortcutEnabled=false,startStale=false,menuStale=false;};
 bool Start(void* context,bool enabled){auto& c=*static_cast<Calls*>(context);++c.start;if(c.startOk)c.startEnabled=enabled;return c.startOk;}
 bool Menu(void* context,bool enabled){auto& c=*static_cast<Calls*>(context);++c.menu;if(c.menuOk)c.menuEnabled=enabled;return c.menuOk;}
 bool StartStale(void* context){return static_cast<Calls*>(context)->startStale;}
 bool MenuStale(void* context){return static_cast<Calls*>(context)->menuStale;}
+bool Shortcut(void* context,bool enabled){auto& c=*static_cast<Calls*>(context);++c.shortcut;if(c.shortcutOk)c.shortcutEnabled=enabled;return c.shortcutOk;}
 bool ShortcutTarget(const std::wstring& path,const std::wstring& expected) {
     IShellLinkW* link=nullptr;IPersistFile* file=nullptr;bool okay=false;
     if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_IShellLinkW,reinterpret_cast<void**>(&link))) &&
@@ -63,7 +64,11 @@ void TestDesktopShortcut() {
         !memcmp(bytes,original,sizeof(original)),"unrelated same-name file contents remain intact");
     if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
     Check(desk::testing::EnsureDesktopShortcutAt(desktop,newExe),"collision fallback also remains stable across launches");
-    DeleteFileW(shortcut.c_str());DeleteFileW(fallback.c_str());
+    Check(desk::testing::SetDesktopShortcutAt(desktop,oldExe,false,true)&&GetFileAttributesW(fallback.c_str())!=INVALID_FILE_ATTRIBUTES,
+        "stale uninstall cannot remove a shortcut targeting another installation");
+    Check(desk::testing::SetDesktopShortcutAt(desktop,newExe,false)&&GetFileAttributesW(fallback.c_str())==INVALID_FILE_ATTRIBUTES&&
+        GetFileAttributesW(shortcut.c_str())!=INVALID_FILE_ATTRIBUTES,"desktop opt-out removes only an owned shortcut and keeps unrelated collision");
+    DeleteFileW(shortcut.c_str());
     Check(RemoveDirectoryW(desktop.c_str())!=FALSE,"remove only explicit isolated shortcut fixtures");
 }
 }
@@ -94,6 +99,24 @@ int main() {
     RegSetValueExW(key,L"InitialIntegrationV1",0,REG_SZ,reinterpret_cast<const BYTE*>(malformed),sizeof(malformed));
     const int previous=calls.start+calls.menu;
     Check(!desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start+calls.menu==previous,"malformed preferences do not overwrite current settings");
+    RegDeleteValueW(key,L"InitialIntegrationV1");calls={};callbacks.desktopShortcut=Shortcut;
+    desk::InstallOptions options;options.autostart=false;options.desktopShortcut=false;options.desktopMenu=false;
+    Check(desk::testing::ApplyInstallOptionsAtKey(key,options,callbacks)&&!calls.startEnabled&&!calls.menuEnabled&&!calls.shortcutEnabled,
+        "installer can opt out of startup, desktop shortcut and menu before the first UI launch");
+    DWORD update=99,bytes=sizeof(update),type=0;
+    Check(RegQueryValueExW(key,L"AutoCheckUpdates",nullptr,&type,reinterpret_cast<BYTE*>(&update),&bytes)==ERROR_SUCCESS&&
+        type==REG_DWORD&&update==0,"automatic update preference defaults to disabled");
+    const int startBefore=calls.start,menuBefore=calls.menu;
+    Check(desk::testing::EnsureDefaultIntegrationsAtKey(key,callbacks)&&calls.start==startBefore&&calls.menu==menuBefore&&!calls.shortcutEnabled,
+        "normal launch respects installer opt-outs instead of restoring portable defaults");
+    options.autoCheckUpdates=true;options.desktopShortcut=true;options.autostart=true;
+    Check(desk::testing::ApplyInstallOptionsAtKey(key,options,callbacks)&&calls.shortcutEnabled&&calls.startEnabled,
+        "reinstall can change explicit choices");
+    bytes=sizeof(update);
+    Check(RegQueryValueExW(key,L"AutoCheckUpdates",nullptr,&type,reinterpret_cast<BYTE*>(&update),&bytes)==ERROR_SUCCESS&&update==1,
+        "reserved automatic update preference is saved without an updater");
+    calls.shortcutOk=false;
+    Check(!desk::testing::ApplyInstallOptionsAtKey(key,options,callbacks),"installer reports integration failures");
     RegCloseKey(key);Check(RegDeleteTreeW(HKEY_CURRENT_USER,path.c_str())==ERROR_SUCCESS,"remove only isolated preference fixture");
     TestDesktopShortcut();
     if(SUCCEEDED(com))CoUninitialize();

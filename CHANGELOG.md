@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 — 2026-11-01
+
+- Add a per-user EXE installer with directory selection, optional desktop shortcut and autostart, and a disabled-by-default reserved automatic-update preference.
+- Preserve installer opt-outs on normal launches and existing portable layouts/recovery records without relocating user data.
+- Request normal shutdown, wait for the application and helpers, and require desktop restoration before upgrading or uninstalling; never force-terminate them.
+- Keep AppData on uninstall and remove only owned integrations. Require existing installed versions to upgrade in place to avoid stale uninstallers.
+- Keep the standalone portable executable, and add isolated installer lifecycle and blocked-restoration tests.
+
 ## 0.8.2 — 2026-10-31
 
 - Repair card and blur-window order after structural window changes, including events that leave foreground focus unchanged.

@@ -30,7 +30,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-release.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\audit-release.ps1 -IncludeArtifacts
 ```
 
-Screenshots use the production renderer with fictional items. The portable ZIP contains only the EXE, license, and usage note. Stage current source before auditing; never include personal layouts, recovery journals, development backups, or build outputs in Git.
+Building the installer requires Inno Setup 7.1+ on the development machine only. `tools/get-inno.ps1` fetches the pinned official compiler, verifies SHA-256 and its Authenticode signature, and extracts it in portable mode. Pass its returned path via `-Iscc` to `tools/package-release.ps1`. `-SkipInstaller` packages only the portable distribution.
+
+Run `tests/installer_tests.ps1 -Iscc C:\path\to\ISCC.exe` for installation, upgrades, opt-outs, restoration failure, and uninstall checks. These use a test-only payload, a dedicated registry key, and temporary links/data; they never install over the user's actual application. The native integration and maintenance suites test the production code independently.
+
+Screenshots use the production renderer with fictional items. The portable ZIP contains only the EXE, license, and usage note; the installer contains the app and license. Stage current source before auditing; never include personal layouts, recovery journals, development backups, or build outputs in Git.
 
 ## Contribution rules
 

@@ -1,4 +1,4 @@
-﻿param([string]$Compiler='', [string]$Version='', [string]$Executable='', [switch]$SkipBuild)
+﻿param([string]$Compiler='', [string]$Version='', [string]$Executable='', [string]$Iscc='', [switch]$SkipBuild, [switch]$SkipInstaller)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path -Parent $PSScriptRoot
@@ -17,11 +17,13 @@ $readme=@'
 Copyright (c) 2026 MCC — MIT License
 
 Windows 10 / 11 x64. Portable: extract this folder to a fixed location and run MintDesk.exe.
-首次正常运行自动加入开机启动、注册桌面右键，并创建桌面快捷方式。
+另提供 EXE 安装程序，可选目录、桌面快捷方式与开机启动；自动检查更新默认关闭，仅预留参数。
+首次使用便携版会配置自启动、右键和桌面快捷方式；已有安装选项会被保留。
 卡片与文件记录保存在当前用户 AppData，更新 EXE 后继续沿用，无需重新拖入。
 托盘菜单可关闭自启动和右键；手动关闭后会保留选择。
 快捷方式只是入口，必须保留 MintDesk.exe。更新时先退出旧版，再覆盖原位置的 EXE。
-换目录时先退出，移动 EXE 后从新位置打开一次，会刷新自有快捷方式及仍启用的入口。
+便携版换目录时先退出，移动 EXE 后从新位置打开一次，会刷新仍启用的入口。
+安装版更新请运行新安装包并使用原安装目录；卸载保留布局与恢复记录。
 
 桌面项保持原路径，仅临时设置 Hidden/System 可见性标记；资源管理器中也会隐藏。
 正常退出恢复原属性，文件夹内容不递归修改。重要资料仍应有独立备份。
@@ -37,11 +39,17 @@ https://github.com/mayflyfy/mint-desk
 [IO.File]::WriteAllText((Join-Path $bundle 'README.txt'),$readme,[Text.UTF8Encoding]::new($true))
 $zip=Join-Path $release ($name+'.zip');Compress-Archive -LiteralPath $bundle -DestinationPath $zip -Force
 Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $release 'MintDesk.exe') -Force
-$sums=@(foreach($path in @((Join-Path $release 'MintDesk.exe'),$zip)){$hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();$hash+'  '+[IO.Path]::GetFileName($path)})
+$artifacts=@((Join-Path $release 'MintDesk.exe'),$zip)
+if(-not $SkipInstaller){
+    & (Join-Path $PSScriptRoot 'build-installer.ps1') -Iscc $Iscc -Executable $exe.FullName -OutputDirectory $release
+    if($LASTEXITCODE -ne 0){throw 'Installer packaging failed.'}
+    $artifacts+=Join-Path $release ("MintDesk-v$Version-setup-x64.exe")
+}
+$sums=@(foreach($path in $artifacts){$hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();$hash+'  '+[IO.Path]::GetFileName($path)})
 [IO.File]::WriteAllLines((Join-Path $release 'SHA256SUMS.txt'),$sums,[Text.UTF8Encoding]::new($false))
 # Remove only the three known staged files and then their empty directories.
 $absoluteStage=[IO.Path]::GetFullPath($stage)
 if(-not $absoluteStage.StartsWith([IO.Path]::GetFullPath($release)+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Invalid staging cleanup path.'}
 foreach($file in @('MintDesk.exe','LICENSE','README.txt')){Remove-Item -LiteralPath (Join-Path $bundle $file)}
 Remove-Item -LiteralPath $bundle;Remove-Item -LiteralPath $stage
-Get-Item -LiteralPath $zip,(Join-Path $release 'MintDesk.exe'),(Join-Path $release 'SHA256SUMS.txt')|Select-Object Name,Length
+Get-Item -LiteralPath ($artifacts+@((Join-Path $release 'SHA256SUMS.txt')))|Select-Object Name,Length

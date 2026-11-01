@@ -31,7 +31,7 @@ try {
         throw "The compiler must target Windows x64; reported target: $target"
     }
 
-    $sourceFiles = @('src/main.cpp', 'src/state.cpp', 'src/shell_items.cpp', 'src/snap.cpp', 'src/desktop_menu.cpp', 'src/startup_integration.cpp', 'src/dragdrop.cpp', 'src/alpha_surface.cpp', 'src/desktop_items.cpp', 'src/hidden_items.cpp', 'src/glass_backdrop.cpp', 'src/file_helper.cpp') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+    $sourceFiles = @('src/main.cpp', 'src/state.cpp', 'src/shell_items.cpp', 'src/snap.cpp', 'src/desktop_menu.cpp', 'src/startup_integration.cpp', 'src/install_support.cpp', 'src/dragdrop.cpp', 'src/alpha_surface.cpp', 'src/desktop_items.cpp', 'src/hidden_items.cpp', 'src/glass_backdrop.cpp', 'src/file_helper.cpp') | ForEach-Object { Join-Path $PSScriptRoot $_ }
     foreach ($sourceFile in $sourceFiles) {
         if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
             throw "Missing source file: $sourceFile"
