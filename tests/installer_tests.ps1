@@ -1,16 +1,6 @@
 ﻿param([string]$Compiler='', [string]$Iscc='')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-Add-Type -Namespace MintDesk.InstallerTests -Name NativePath -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
-public static extern uint GetLongPathName(string path, System.Text.StringBuilder result, uint length);
-'@
-function NormalizeExistingPath([string]$Path) {
-    $buffer=[Text.StringBuilder]::new(32768)
-    $length=[MintDesk.InstallerTests.NativePath]::GetLongPathName($Path,$buffer,[uint32]$buffer.Capacity)
-    if($length -gt 0 -and $length -lt $buffer.Capacity){return $buffer.ToString()}
-    return $Path
-}
 $projectDirectory=Split-Path -Parent $PSScriptRoot
 if(-not $Compiler){
     $compilerCommand=Get-Command g++.exe -ErrorAction SilentlyContinue
@@ -68,13 +58,10 @@ function CheckChoices([bool]$DesktopIcon,[bool]$Autostart,[bool]$Update,[bool]$M
     if($Autostart){Check ($runValues.MintDesk -eq ('"'+(Join-Path $appDirectory 'MintDesk.exe')+'" /background')) 'Autostart path was not refreshed.'}
     Check ((ReadPreference 'AutoCheckUpdates') -eq [int]$Update) 'Reserved update preference mismatch.'
     Check ((Test-Path -LiteralPath ($fixtureKey+'\Shell\MintDesk')) -eq $Menu) 'Desktop menu preference mismatch.'
-    if($DesktopIcon){$shell=New-Object -ComObject WScript.Shell;$link=$shell.CreateShortcut($shortcut)
-        $actualTarget=$link.TargetPath
-        $expectedTarget=Join-Path $appDirectory 'MintDesk.exe'
-        # Windows Script Host can expand the runner's RUNNER~1 temporary path
-        # to its long form. Both names must still identify the installed file.
-        Check ((NormalizeExistingPath $actualTarget) -eq (NormalizeExistingPath $expectedTarget)) `
-            ('Shortcut did not point at installed executable. Actual: '+$actualTarget+'; expected: '+$expectedTarget)}
+    if($DesktopIcon){
+        $probe=Start-Process -FilePath (Join-Path $appDirectory 'MintDesk.exe') -ArgumentList '/verify-shortcut' -WindowStyle Hidden -Wait -PassThru
+        Check ($probe.ExitCode -eq 0) 'Native shortcut target/arguments did not point at the installed executable.'
+    }
 }
 function Uninstall {
     $uninstaller=Join-Path $appDirectory 'Uninstall\unins000.exe'
@@ -108,8 +95,8 @@ Check (-not(Test-Path -LiteralPath ($fixtureKey+'\Shell\MintDesk'))) 'Uninstalle
 # Simulate v0.8.x portable preferences: completed defaults, no new installer
 # preference values, disabled startup/menu, and an existing native shortcut.
 foreach($name in @('DesktopShortcutEnabled','AutoCheckUpdates')){Remove-ItemProperty -LiteralPath $fixtureKey -Name $name}
-$shell=New-Object -ComObject WScript.Shell;$link=$shell.CreateShortcut($shortcut)
-$link.TargetPath=$payload;$link.Arguments='/show';$link.Description='薄荷桌面助手 / MintDesk';$link.Save()
+$legacy=Start-Process -FilePath $payload -ArgumentList '/create-legacy-shortcut' -WindowStyle Hidden -Wait -PassThru
+Check ($legacy.ExitCode -eq 0) 'Could not create the isolated legacy shortcut.'
 Check ((RunSetup) -eq 0) 'Legacy portable-to-installed upgrade failed.'
 CheckChoices $true $false $false $false
 Check ((Uninstall) -eq 0) 'Legacy upgrade uninstall failed.'
