@@ -1,4 +1,4 @@
-param([string]$Compiler='', [string]$Iscc='')
+﻿param([string]$Compiler='', [string]$Iscc='')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $projectDirectory=Split-Path -Parent $PSScriptRoot

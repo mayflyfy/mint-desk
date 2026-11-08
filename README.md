@@ -4,11 +4,11 @@
 
 [下载最新版](https://github.com/mayflyfy/mint-desk/releases/latest) · [使用说明](docs/usage.md) · [参与开发](CONTRIBUTING.md)
 
-| 轻巧一点 | v0.9.0 Windows x64 |
+| 轻巧一点 | v0.9.1 Windows x64 |
 | --- | --- |
-| 单文件 EXE | **约 0.43 MB**（约 421 KiB） |
+| 单文件 EXE | **约 0.44 MB**（约 430 KiB） |
 | 可选安装包 | **约 2.2 MB**；可选目录与启动选项 |
-| ZIP 下载包 | **约 0.20 MB** |
+| ZIP 下载包 | **约 0.21 MB** |
 | 运行依赖 | **无需额外依赖或运行库**，解压即用 |
 | 内存占用 | v0.8.2 主进程工作集实测 **约 31 MiB**；私有内存约 9 MiB¹ |
 | 安静运行 | **无广告、推广和通知弹窗** |
@@ -21,7 +21,11 @@
 
 ¹ 本机短时采样，随卡片、文件和系统环境变化；恢复守护与按需权限辅助进程另计。[实测与验证范围](docs/verification.md)
 
-![MintDesk 列表与网格演示](docs/screenshots/overview.png)
+![MintDesk 紧凑多卡片：真实文档、应用图标与项目目录](docs/screenshots/overview.png)
+
+使用实际程序渲染与 Windows 系统图标，文件名和目录均为独立示例。展示网格 / 列表、应用快捷方式、文件夹、锁定与收起。
+
+![MintDesk 拖动图标、插入位置与跨卡片目标提示](docs/screenshots/reorder.png)
 
 ## 常用功能
 

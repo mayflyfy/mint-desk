@@ -110,6 +110,81 @@ bool Execute(HWND owner, const std::wstring& path, const wchar_t* verb,
 
 } // namespace
 
+ShellItemStatus InspectShellItem(const std::wstring& path) {
+    ShellItemStatus status;
+    auto inspect = [&](const std::wstring& candidate) {
+        if (!IsSupportedPath(candidate) || candidate.size() < 3 || candidate[1] != L':') return false;
+        const std::wstring root = candidate.substr(0, 2) + L"\\";
+        if (GetDriveTypeW(root.c_str()) != DRIVE_FIXED) return false;
+        const DWORD attributes = GetFileAttributesW(candidate.c_str());
+        const DWORD error = attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
+        // Watch a surviving ancestor too, in case an uninstaller removes the
+        // whole installation directory rather than just the executable.
+        std::wstring parent = candidate;
+        while (parent.size() > 3) {
+            const auto slash = parent.find_last_of(L"\\/");
+            if (slash == std::wstring::npos) break;
+            parent.resize((std::max<size_t>)(3, slash));
+            if (GetFileAttributesW(parent.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                status.watchDirectories.push_back(parent);
+                break;
+            }
+        }
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    };
+    status.missing = inspect(path);
+    if (status.missing || status.watchDirectories.empty() || !HasSuffix(path, L".lnk")) return status;
+    ComApartment apartment;
+    if (!apartment.usable()) return status;
+    ComPtr<IShellLinkW> link;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+            IID_IShellLinkW, reinterpret_cast<void**>(link.put())))) return status;
+    ComPtr<IPersistFile> file;
+    if (FAILED(link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(file.put()))) ||
+        FAILED(file->Load(path.c_str(), STGM_READ))) return status;
+    wchar_t target[32768]{};
+    if (FAILED(link->GetPath(target, ARRAYSIZE(target), nullptr, SLGP_RAWPATH)) || !target[0]) return status;
+    wchar_t expanded[32768]{};
+    const DWORD length = ExpandEnvironmentStringsW(target, expanded, ARRAYSIZE(expanded));
+    if (length && length <= ARRAYSIZE(expanded)) status.missing = inspect(expanded);
+    return status;
+}
+
+ShellChangeWatch::~ShellChangeWatch() { Clear(); }
+void ShellChangeWatch::Clear() {
+    for (const auto& entry : registrations_) SHChangeNotifyDeregister(entry.id);
+    registrations_.clear();
+}
+void ShellChangeWatch::Update(HWND window, UINT message, std::vector<std::wstring> directories) {
+    const auto less = [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; };
+    std::sort(directories.begin(), directories.end(), less);
+    directories.erase(std::unique(directories.begin(), directories.end(),
+        [](const std::wstring& a, const std::wstring& b) { return !_wcsicmp(a.c_str(), b.c_str()); }), directories.end());
+    for (auto it = registrations_.begin(); it != registrations_.end();) {
+        if (!std::binary_search(directories.begin(), directories.end(), it->directory, less)) {
+            SHChangeNotifyDeregister(it->id);
+            it = registrations_.erase(it);
+        } else ++it;
+    }
+    for (const auto& directory : directories) {
+        if (std::any_of(registrations_.begin(), registrations_.end(), [&](const Registration& entry) {
+                return !_wcsicmp(directory.c_str(), entry.directory.c_str()); })) continue;
+        PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(directory.c_str());
+        if (!pidl) continue;
+        SHChangeNotifyEntry entry{pidl, FALSE};
+        const ULONG id = SHChangeNotifyRegister(window,
+            SHCNRF_InterruptLevel | SHCNRF_ShellLevel | SHCNRF_NewDelivery,
+            SHCNE_DELETE | SHCNE_RMDIR | SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER |
+                SHCNE_UPDATEDIR | SHCNE_UPDATEITEM | SHCNE_CREATE | SHCNE_MKDIR,
+            message, 1, &entry);
+        CoTaskMemFree(pidl);
+        if (id) {
+            try { registrations_.push_back({directory, id}); }
+            catch (...) { SHChangeNotifyDeregister(id); throw; }
+        }
+    }
+}
+
 bool IsSupportedPath(const std::wstring& path) {
     // Reject commands, URLs, control characters and malformed shell arguments.
     // Actual file existence is deliberately left to the requested shell action.

@@ -1529,6 +1529,113 @@ void TestVisualOwnership(Card& card) {
     CheckUi(!card.status.empty(), "failed action result updates card without launching anything");
 }
 
+void TestAutomaticItemCleanup(const Fixture& fixture) {
+    const auto programDirectory=fixture.directory+L"\\fictional-install";
+    const auto target=programDirectory+L"\\fictional-app.exe";
+    const auto shortcut=fixture.directory+L"\\fictional-app.lnk";
+    CheckUi(CreateDirectoryW(programDirectory.c_str(),nullptr)!=FALSE,"create isolated install directory");
+    HANDLE file=CreateFileW(target.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    CheckUi(file!=INVALID_HANDLE_VALUE,"create isolated executable reference");
+    if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+    IShellLinkW* link=nullptr;IPersistFile* persist=nullptr;
+    bool ready=SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,
+        IID_IShellLinkW,reinterpret_cast<void**>(&link)));
+    if(ready)ready=SUCCEEDED(link->SetPath(target.c_str()))&&
+        SUCCEEDED(link->QueryInterface(IID_IPersistFile,reinterpret_cast<void**>(&persist)))&&
+        SUCCEEDED(persist->Save(shortcut.c_str(),TRUE));
+    if(persist)persist->Release();
+    if(link)link->Release();
+    CheckUi(ready,"create native shortcut for automatic uninstall cleanup");
+    if(ready) {
+        // Keep inspection confined to these fixtures. Other test cards contain
+        // deliberately fictional paths which must remain for subsequent tests.
+        auto previous=std::move(app.cards);
+        app.cards.clear();
+        desk::CardState state;state.id=app.nextId++;state.title=L"cleanup fixture";
+        state.paths={shortcut,fixture.original};
+        Card* first=CreateCard(state);
+        state.id=app.nextId++;state.paths.clear();
+        Card* second=CreateCard(state);
+        app.worker=StartWorker();
+        auto waitFor=[&](auto predicate,DWORD timeout=7000) {
+            const auto deadline=GetTickCount64()+timeout;
+            while(!predicate()&&GetTickCount64()<deadline)PumpLayerRepairs(20);
+            return predicate();
+        };
+        if(first&&second&&app.worker) {
+            QueueItemChecks();
+            CheckUi(waitFor([&]{return !first->items[0].watchDirectories.empty();}),
+                "worker registers watches for both shortcut and install directory");
+            CheckUi(MoveBetweenCards(*first,*second,shortcut,true),"copy reference with its watches to another card");
+            first->selected=1;
+            const auto keptToken=first->items[1].token;
+            // The result of an in-flight check must not mutate a modal drag.
+            {
+                ModalScope modal;
+                auto* result=new VisualResult;
+                result->cardId=first->state.id;result->token=first->items[0].token;
+                result->action=InspectItem;result->inspected=true;
+                result->status=desk::InspectShellItem(shortcut);result->status.missing=true;
+                SendMessageW(app.controller,kVisual,0,reinterpret_cast<LPARAM>(result));
+                CheckUi(first->items.size()==2,"missing check is deferred during nested drag/menu loops");
+            }
+            // Let that deliberately deferred check settle before testing the
+            // real filesystem event, so no manually requested check can mask it.
+            SendMessageW(app.controller,WM_TIMER,kItemsTimer,0);
+            PumpLayerRepairs(300);
+            KillTimer(app.controller,kItemsTimer);
+            CheckUi(DeleteFileW(target.c_str())!=FALSE,"simulate native software uninstall without a Shell notification");
+            CheckUi(waitFor([&]{return first->state.paths.size()==1&&second->state.paths.empty();}),
+                "filesystem notification automatically removes stale shortcuts from every card");
+            CheckUi(first->state.paths==std::vector<std::wstring>{fixture.original}&&
+                first->items.size()==1&&first->items[0].token==keptToken&&first->selected<=0,
+                "cleanup preserves surviving item identity and order with valid selection");
+            first->state.paths.insert(first->state.paths.begin(),shortcut);
+            HICON removedIcon=TestIcon();
+            first->items.insert(first->items.begin(),{removedIcon,L"stale fixture",app.nextToken++});
+            first->selected=1;
+            VisualResult missing;missing.inspected=true;missing.status.missing=true;
+            ApplyItemStatus(*first,0,missing);
+            CheckUi(first->selected==0&&first->items[0].token==keptToken&&!IconAlive(removedIcon),
+                "removing an earlier stale row retains selection identity and frees its icon");
+            CheckUi(GetFileAttributesW(shortcut.c_str())!=INVALID_FILE_ATTRIBUTES,
+                "cleanup never deletes the original shortcut file");
+            const auto saved=fixture.directory+L"\\cleanup-state";
+            uiTestStateDirectory=saved;app.preview=false;Save();app.preview=true;
+            uiTestStateDirectory.clear();
+            desk::AppState loaded;
+            CheckUi(desk::testing::LoadStateFromDirectory(saved,loaded)&&loaded.cards.size()==2&&
+                loaded.cards[0].paths==first->state.paths&&loaded.cards[1].paths.empty(),
+                "removed uninstall references stay removed in the saved layout");
+            DeleteFileW((saved+L"\\state.dat").c_str());
+            DeleteFileW((saved+L"\\state.backup.dat").c_str());
+            RemoveDirectoryW(saved.c_str());
+            // A deleted shortcut should follow the same automatic path.
+            CheckUi(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,
+                IID_IShellLinkW,reinterpret_cast<void**>(&link))),"recreate link object");
+            if(link) {
+                link->SetPath(fixture.original.c_str());
+                if(SUCCEEDED(link->QueryInterface(IID_IPersistFile,reinterpret_cast<void**>(&persist)))) {
+                    persist->Save(shortcut.c_str(),TRUE);persist->Release();persist=nullptr;
+                }
+                link->Release();link=nullptr;
+            }
+            AddPaths(*second,{shortcut});QueueItemChecks();
+            CheckUi(waitFor([&]{return !second->items.empty()&&!second->items[0].watchDirectories.empty();}),
+                "new shortcut starts watching after card insertion");
+            DeleteFileW(shortcut.c_str());
+            CheckUi(waitFor([&]{return second->state.paths.empty();}),"deleted shortcut is automatically removed");
+            PumpLayerRepairs(1000);
+            CheckUi(!KillTimer(app.controller,kItemsTimer),"cleanup timer stops once filesystem events settle");
+        }
+        StopWorker(app.worker);PumpLayerRepairs(100);
+        app.itemWatch.Clear();KillTimer(app.controller,kItemsTimer);
+        for(auto& card:app.cards)if(card->hwnd)DestroyWindow(card->hwnd);
+        app.cards=std::move(previous);SyncSelectionHook();
+    }
+    DeleteFileW(shortcut.c_str());DeleteFileW(target.c_str());RemoveDirectoryW(programDirectory.c_str());
+}
+
 bool SavePreviewPng(HBITMAP image, const std::wstring& path) {
     Gdiplus::GdiplusStartupInput input;
     ULONG_PTR token = 0;
@@ -1870,6 +1977,7 @@ int wmain() {
                 TestNativeSnapping(card);
                 TestControllerCommands();
                 TestVisualOwnership(card);
+                TestAutomaticItemCleanup(fixture);
                 ExportRenderedPreview();
                 TestCloseRestoreFailureKeepsInstance(fixture);
                 const bool retainedOriginal = app.controller && IsWindow(app.controller) &&

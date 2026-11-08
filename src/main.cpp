@@ -9,6 +9,7 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <dwmapi.h>
 #include <algorithm>
 #include <atomic>
@@ -42,7 +43,9 @@ constexpr UINT kTray = WM_APP + 1, kVisual = WM_APP + 2;
 constexpr UINT kLower = WM_APP + 3, kShow = WM_APP + 4;
 constexpr UINT kNewCard = WM_APP + 5;
 constexpr UINT kSelectionClick = WM_APP + 6;
+constexpr UINT kItemsChanged = WM_APP + 7;
 constexpr UINT_PTR kSaveTimer = 1, kDisplayTimer = 2;
+constexpr UINT_PTR kItemsTimer = 3;
 constexpr UINT_PTR kAnimationTimer = 10, kStatusTimer = 11;
 constexpr UINT_PTR kCaretTimer = 12, kDragScrollTimer = 13;
 constexpr ULONGLONG kFeedbackDuration = 180;
@@ -54,13 +57,15 @@ constexpr COLORREF kAccent = RGB(85, 211, 177), kHover = RGB(37, 46, 56);
 enum Command : UINT {
     AddFiles = 100, AddFolder, Rename, Grid, List, Lock, NewCard, RemoveCard,
     Autostart, Quit, ShowCards, Open, Reveal, RemoveItem,
-    OpacitySolid, Opacity50, Opacity25, OpacityTransparent, DesktopMenu, DesktopPermission
+    OpacitySolid, Opacity50, Opacity25, OpacityTransparent, DesktopMenu, DesktopPermission,
+    InspectItem
 };
 
 struct Item {
     HICON icon = nullptr;
     std::wstring label;
     uint64_t token = 0;
+    std::vector<std::wstring> watchDirectories{};
 };
 struct Card {
     desk::CardState state;
@@ -91,13 +96,15 @@ struct Card {
         if (smallFont) DeleteObject(smallFont);
     }
 };
-struct Job { uint32_t cardId; uint64_t token; int size; std::wstring path; UINT action = 0; std::wstring label; };
+struct Job { uint32_t cardId; uint64_t token; int size; std::wstring path; UINT action = 0; std::wstring label; bool inspect = false; };
 struct VisualResult {
     uint32_t cardId = 0;
     uint64_t token = 0;
     desk::ShellVisual visual;
     UINT action = 0;
     bool okay = false;
+    bool inspected = false;
+    desk::ShellItemStatus status;
     ~VisualResult() { if (visual.icon) DestroyIcon(visual.icon); }
 };
 struct Worker {
@@ -132,6 +139,7 @@ struct Application {
     uint32_t dragSourceId = 0;
     const std::wstring* dragReference = nullptr;
     bool dragHandledInside = false;
+    desk::ShellChangeWatch itemWatch;
     int exitCode = 0;
 } app;
 
@@ -162,6 +170,7 @@ void SyncSelectionHook() {
 }
 void Invalidate(Card& c) { SyncSelectionHook(); InvalidateRect(c.hwnd, nullptr, FALSE); }
 void Notify(Card& c,const std::wstring& message);
+void SyncItemWatches();
 void Dirty() { if (!app.quitting && !app.displayChanging && !app.preview) SetTimer(app.controller, kSaveTimer, 350, nullptr); }
 
 void ClearSelection(Card& card) {
@@ -454,9 +463,13 @@ DWORD WINAPI WorkerMain(void* param) {
                 result->action = job.action;
                 if (job.action == Open) result->okay = desk::OpenItem(nullptr, job.path);
                 else if (job.action == Reveal) result->okay = desk::RevealItem(nullptr, job.path);
-                else {
+                else if (job.action != InspectItem) {
                     result->visual = desk::LoadShellVisual(job.path, job.size);
                     if (!job.label.empty()) result->visual.label=job.label;
+                }
+                if (job.inspect || job.action == InspectItem) {
+                    result->status = desk::InspectShellItem(job.path);
+                    result->inspected = true;
                 }
                 if (!worker->stopping.load() && PostMessageW(app.controller, kVisual, 0,
                         reinterpret_cast<LPARAM>(result.get()))) result.release();
@@ -515,7 +528,7 @@ void QueueVisual(Card& c, size_t index) {
     const auto& reference=c.state.paths[index];
     const auto resolved=desk::ResolveDesktopItem(reference);
     Job job{c.state.id,item.token,Dip(c,c.state.layout==desk::Layout::Grid?40:16),resolved,0,
-        resolved==reference?L"":FallbackLabel(reference)};
+        resolved==reference?L"":FallbackLabel(reference),!app.preview};
     CriticalLock lock(app.worker->mutex);
     app.worker->queue.push_back(std::move(job));
     SetEvent(app.worker->event);
@@ -1134,6 +1147,7 @@ void HandleCommand(Card* c, UINT command) {
             const HWND window=c->hwnd;
             DestroyWindow(window);
             app.cards.erase(std::remove_if(app.cards.begin(),app.cards.end(),[&](const std::unique_ptr<Card>& card) {return card.get()==c;}),app.cards.end());
+            SyncItemWatches();
             SyncSelectionHook();
             Dirty(); return;
         } break;
@@ -1152,6 +1166,7 @@ void HandleCommand(Card* c, UINT command) {
             if (c->items[c->selected].icon) DestroyIcon(c->items[c->selected].icon);
             c->state.paths.erase(c->state.paths.begin()+c->selected);
             c->items.erase(c->items.begin()+c->selected);
+            SyncItemWatches();
             c->selected=std::min(c->selected,static_cast<int>(c->items.size())-1); c->hovered=-1;
             ClampScroll(*c); Dirty();
         } break;
@@ -1209,6 +1224,7 @@ bool MoveBetweenCards(Card& source,Card& target,const std::wstring& reference,bo
         Item item;
         if(copy) {
             item.label=source.items[fromIndex].label;item.token=app.nextToken++;
+            item.watchDirectories=source.items[fromIndex].watchDirectories;
             if(source.items[fromIndex].icon){item.icon=CopyIcon(source.items[fromIndex].icon);if(!item.icon)return false;}
         } else item=std::move(source.items[fromIndex]);
         try { target.state.paths.push_back(reference); }
@@ -1237,7 +1253,58 @@ bool MoveBetweenCards(Card& source,Card& target,const std::wstring& reference,bo
     EnsureSelectedVisible(target);
     if(IsWindowVisible(target.hwnd))FocusCard(target,target.hwnd);
     Invalidate(source);Invalidate(target);UpdateWindow(source.hwnd);UpdateWindow(target.hwnd);
-    Dirty();return true;
+    SyncItemWatches();Dirty();return true;
+}
+
+void SyncItemWatches() {
+    std::vector<std::wstring> directories;
+    for (const auto& card : app.cards) for (const auto& item : card->items)
+        directories.insert(directories.end(), item.watchDirectories.begin(), item.watchDirectories.end());
+    app.itemWatch.Update(app.controller, kItemsChanged, std::move(directories));
+}
+
+void QueueItemChecks() {
+    if (app.quitting || !app.worker) return;
+    // OLE and menus pump messages reentrantly. Reconcile after they return so
+    // neither the dragged item nor a pending context-menu selection can vanish.
+    if (app.modalDepth) { SetTimer(app.controller, kItemsTimer, 150, nullptr); return; }
+    CriticalLock lock(app.worker->mutex);
+    auto& queue = app.worker->queue;
+    queue.erase(std::remove_if(queue.begin(), queue.end(), [](const Job& job) {
+        return job.action == InspectItem;
+    }), queue.end());
+    for (const auto& card : app.cards) for (size_t i = 0; i < card->items.size(); ++i) {
+        const auto& item = card->items[i];
+        queue.push_back({card->state.id, item.token, 0,
+            desk::ResolveDesktopItem(card->state.paths[i]), InspectItem, {}});
+    }
+    SetEvent(app.worker->event);
+}
+
+void ApplyItemStatus(Card& card, size_t index, VisualResult& result) {
+    if (!result.inspected) return;
+    card.items[index].watchDirectories = std::move(result.status.watchDirectories);
+    if (result.status.missing) {
+        if (app.modalDepth) SetTimer(app.controller, kItemsTimer, 150, nullptr);
+        else {
+            const auto& reference = card.state.paths[index];
+            // Dropping a stale reference also retires its visibility journal.
+            // Existing shortcut files are restored, never deleted by cleanup.
+            if (!app.preview && ReferenceCount(reference) <= 1 && !desk::ReleaseDesktopItem(reference)) {
+                SyncItemWatches(); return;
+            }
+            card.mouseDownItem = -1;
+            if (GetCapture() == card.hwnd) ReleaseCapture();
+            if (card.items[index].icon) DestroyIcon(card.items[index].icon);
+            card.items.erase(card.items.begin() + index);
+            card.state.paths.erase(card.state.paths.begin() + index);
+            if (card.selected == static_cast<int>(index)) card.selected = -1;
+            else if (card.selected > static_cast<int>(index)) --card.selected;
+            card.hovered = -1;
+            ClampScroll(card); Dirty();
+        }
+    }
+    SyncItemWatches();
 }
 
 bool CardMoveFeedback(void*,const std::vector<std::wstring>& paths,DWORD keys) {
@@ -1649,12 +1716,16 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     case kVisual: {
         std::unique_ptr<VisualResult> result(reinterpret_cast<VisualResult*>(lp));
         for (auto& card:app.cards) if (card->state.id==result->cardId) {
-            if (result->action) {
+            if (result->action && result->action != InspectItem) {
                 Notify(*card,result->okay?L"":L"无法打开：文件可能已移动或不可用");
-            } else for (auto& item:card->items) if (item.token==result->token) {
-                if (item.icon) DestroyIcon(item.icon);
-                item.icon=result->visual.icon; result->visual.icon=nullptr;
-                if (!result->visual.label.empty()) item.label=std::move(result->visual.label);
+            } else for (size_t i=0; i<card->items.size(); ++i) if (card->items[i].token==result->token) {
+                auto& item=card->items[i];
+                if (result->action != InspectItem) {
+                    if (item.icon) DestroyIcon(item.icon);
+                    item.icon=result->visual.icon; result->visual.icon=nullptr;
+                    if (!result->visual.label.empty()) item.label=std::move(result->visual.label);
+                }
+                ApplyItemStatus(*card,i,*result);
                 break;
             }
             Invalidate(*card); break;
@@ -1677,9 +1748,20 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         return 0;
     case kShow: HandleCommand(nullptr,ShowCards); return 0;
     case kNewCard: HandleCommand(nullptr,NewCard); return 0;
+    case kItemsChanged: {
+        PIDLIST_ABSOLUTE* paths=nullptr; LONG event=0;
+        HANDLE notification=SHChangeNotification_Lock(reinterpret_cast<HANDLE>(wp),static_cast<DWORD>(lp),&paths,&event);
+        if (notification) {
+            SHChangeNotification_Unlock(notification);
+            if (!app.quitting) SetTimer(hwnd,kItemsTimer,450,nullptr);
+        }
+        return 0;
+    }
     case WM_TIMER:
         KillTimer(hwnd,wp);
-        if (wp==kSaveTimer) Save(); else if (wp==kDisplayTimer) ReflowDisplays(); return 0;
+        if (wp==kSaveTimer) Save(); else if (wp==kDisplayTimer) ReflowDisplays();
+        else if (wp==kItemsTimer) QueueItemChecks();
+        return 0;
     case WM_DISPLAYCHANGE:
         app.displayChanging=true; KillTimer(hwnd,kSaveTimer); SetTimer(hwnd,kDisplayTimer,500,nullptr); return 0;
     case WM_SETTINGCHANGE:
@@ -1694,7 +1776,7 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
         if (app.quitting) return 0;
         if (app.modalDepth) { app.pendingQuit=true; return 0; }
-        app.quitting=true; KillTimer(hwnd,kSaveTimer); KillTimer(hwnd,kDisplayTimer);
+        app.quitting=true; KillTimer(hwnd,kSaveTimer); KillTimer(hwnd,kDisplayTimer); KillTimer(hwnd,kItemsTimer);
         for (auto& card:app.cards) FinishRename(*card,true);
         if (app.displayChanging) ReflowDisplays();
         StopWorker(app.worker); StopWorker(app.actions);
@@ -1715,6 +1797,7 @@ LRESULT ControllerMessage(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         if (app.foregroundHook) { UnhookWinEvent(app.foregroundHook); app.foregroundHook=nullptr; }
         if (app.layerHook) { UnhookWinEvent(app.layerHook); app.layerHook=nullptr; }
         if (app.selectionHook) { UnhookWindowsHookEx(app.selectionHook); app.selectionHook=nullptr; }
+        app.itemWatch.Clear();
         for (HWND& guide : app.snapGuides) if (guide) { DestroyWindow(guide); guide=nullptr; }
         if (app.trayAdded) Tray(NIM_DELETE);
         Save();

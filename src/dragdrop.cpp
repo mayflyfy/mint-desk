@@ -1,5 +1,6 @@
 #include "dragdrop.h"
 #include "shell_items.h"
+#include "alpha_surface.h"
 
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -292,6 +293,22 @@ HGLOBAL CopyGlobal(HGLOBAL memory) {
     return copy;
 }
 
+HRESULT CopyPrivateMedium(const STGMEDIUM& source, STGMEDIUM* result) {
+    *result = {};
+    if (source.tymed == TYMED_HGLOBAL) {
+        result->hGlobal = CopyGlobal(source.hGlobal);
+        if (!result->hGlobal) return E_OUTOFMEMORY;
+    } else if (source.tymed == TYMED_ISTREAM && source.pstm) {
+        result->pstm = source.pstm;
+        result->pstm->AddRef();
+    } else if (source.tymed == TYMED_ISTORAGE && source.pstg) {
+        result->pstg = source.pstg;
+        result->pstg->AddRef();
+    } else return DV_E_TYMED;
+    result->tymed = source.tymed;
+    return S_OK;
+}
+
 struct StoredMedium {
     FORMATETC format{};
     STGMEDIUM medium{};
@@ -358,11 +375,10 @@ public:
         } else {
             for (const auto& stored : stored_) {
                 if (stored.format.cfFormat == format->cfFormat) {
-                    memory = CopyGlobal(stored.medium.hGlobal);
-                    break;
+                    return CopyPrivateMedium(stored.medium, medium);
                 }
             }
-            if (!memory) return E_OUTOFMEMORY;
+            return DV_E_FORMATETC;
         }
         medium->tymed = TYMED_HGLOBAL;
         medium->hGlobal = memory;
@@ -375,10 +391,11 @@ public:
         if (!format) return E_POINTER;
         if (format->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
         if (format->lindex != -1) return DV_E_LINDEX;
-        if (!(format->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
-        if (format->cfFormat == CF_HDROP || format->cfFormat == PreferredEffectFormat()) return S_OK;
+        if (format->cfFormat == CF_HDROP || format->cfFormat == PreferredEffectFormat())
+            return (format->tymed & TYMED_HGLOBAL) ? S_OK : DV_E_TYMED;
         for (const auto& stored : stored_) {
-            if (stored.format.cfFormat == format->cfFormat) return S_OK;
+            if (stored.format.cfFormat == format->cfFormat)
+                return (format->tymed & stored.medium.tymed) ? S_OK : DV_E_TYMED;
         }
         return DV_E_FORMATETC;
     }
@@ -388,15 +405,17 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetData(FORMATETC* format, STGMEDIUM* medium, BOOL release) override {
         if (!format || !medium) return E_POINTER;
-        // Shell drag-image helpers attach private HGLOBAL formats through this
-        // method. The exported reference and its safe preferred effect stay fixed.
+        // Shell helpers attach both HGLOBAL image bits and an IStream drag
+        // context. Rejecting the latter aborts image initialization on Windows.
+        // The exported reference and its safe preferred effect stay fixed.
         if (format->cfFormat == CF_HDROP || format->cfFormat == PreferredEffectFormat()) {
             return E_ACCESSDENIED;
         }
         if (format->ptd || format->dwAspect != DVASPECT_CONTENT || format->lindex != -1) {
             return DV_E_FORMATETC;
         }
-        if (!(format->tymed & TYMED_HGLOBAL) || medium->tymed != TYMED_HGLOBAL ||
+        if (!(format->tymed & medium->tymed) ||
+            (medium->tymed != TYMED_HGLOBAL && medium->tymed != TYMED_ISTREAM && medium->tymed != TYMED_ISTORAGE) ||
             !medium->hGlobal) return DV_E_TYMED;
         try {
             // Reserve before taking ownership: failure must leave the caller's
@@ -404,12 +423,11 @@ public:
             stored_.reserve(stored_.size() + 1);
             StoredMedium incoming;
             incoming.format = *format;
-            incoming.format.tymed = TYMED_HGLOBAL;
-            incoming.medium.tymed = TYMED_HGLOBAL;
+            incoming.format.tymed = medium->tymed;
             if (release) incoming.medium = *medium;
             else {
-                incoming.medium.hGlobal = CopyGlobal(medium->hGlobal);
-                if (!incoming.medium.hGlobal) return E_OUTOFMEMORY;
+                const HRESULT copied = CopyPrivateMedium(*medium, &incoming.medium);
+                if (FAILED(copied)) return copied;
             }
             for (auto& stored : stored_) {
                 if (stored.format.cfFormat == format->cfFormat) {
@@ -529,12 +547,13 @@ private:
     void* externalContext_=nullptr;
 };
 
-void InitializeIconDragImage(IDataObject* data, HICON icon) {
-    if (!icon) return;
-    IDragSourceHelper* helper = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
-        IID_IDragSourceHelper, reinterpret_cast<void**>(&helper)))) return;
-    const int size = (std::max)(32, GetSystemMetrics(SM_CXICON));
+HBITMAP IconDragBitmap(HICON icon, int size) {
+    if (!icon) icon = LoadIconW(nullptr, IDI_APPLICATION);
+    AlphaSurface surface;
+    if (!surface.Create(size, size)) return nullptr;
+    if (!DrawIconEx(surface.BlackDC(), 0, 0, icon, size, size, 0, nullptr, DI_NORMAL) ||
+        !DrawIconEx(surface.WhiteDC(), 0, 0, icon, size, size, 0, nullptr, DI_NORMAL) ||
+        !surface.Compose(RGB(0, 0, 0), 0)) return nullptr;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = size;
@@ -544,13 +563,11 @@ void InitializeIconDragImage(IDataObject* data, HICON icon) {
     info.bmiHeader.biCompression = BI_RGB;
     void* pixels = nullptr;
     HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-    HDC dc = bitmap ? CreateCompatibleDC(nullptr) : nullptr;
-    if (dc && pixels) {
-        std::memset(pixels, 0, static_cast<std::size_t>(size) * size * 4);
-        HGDIOBJ previous = SelectObject(dc, bitmap);
-        DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL);
-        SelectObject(dc, previous);
-        // Icon pixels are premultiplied; the helper expects straight alpha.
+    if (bitmap && pixels) {
+        // Shell icons can use an AND mask with no alpha channel. Recover alpha
+        // from two mattes (including GdiFlush), then give the helper straight
+        // alpha so legacy icons cannot become fully transparent while dragging.
+        std::memcpy(pixels, surface.Pixels(), static_cast<size_t>(size) * size * 4);
         auto* colors = static_cast<DWORD*>(pixels);
         for (int index = 0; index < size * size; ++index) {
             const DWORD alpha = colors[index] >> 24;
@@ -561,17 +578,26 @@ void InitializeIconDragImage(IDataObject* data, HICON icon) {
                 colors[index] = (alpha << 24) | (red << 16) | (green << 8) | blue;
             }
         }
-        SHDRAGIMAGE image{};
-        image.sizeDragImage = {size, size};
-        image.ptOffset = {size / 2, size / 2};
-        image.hbmpDragImage = bitmap;
-        image.crColorKey = CLR_NONE;
-        // The helper serializes the image into the object's private formats.
-        helper->InitializeFromBitmap(&image, data);
     }
-    if (dc) DeleteDC(dc);
-    if (bitmap) DeleteObject(bitmap);
+    return bitmap;
+}
+
+bool InitializeIconDragImage(IDataObject* data, HICON icon) {
+    IDragSourceHelper* helper = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
+        IID_IDragSourceHelper, reinterpret_cast<void**>(&helper)))) return false;
+    const int size = (std::max)(32, GetSystemMetrics(SM_CXICON));
+    HBITMAP bitmap = IconDragBitmap(icon, size);
+    SHDRAGIMAGE image{};
+    image.sizeDragImage = {size, size};
+    image.ptOffset = {size / 2, size / 2};
+    image.hbmpDragImage = bitmap;
+    image.crColorKey = CLR_NONE;
+    const bool initialized = bitmap && SUCCEEDED(helper->InitializeFromBitmap(&image, data));
+    // Successful initialization transfers bitmap ownership to the Shell helper.
+    if (!initialized && bitmap) DeleteObject(bitmap);
     helper->Release();
+    return initialized;
 }
 
 } // namespace
@@ -620,6 +646,8 @@ DWORD DragFileReference(HWND owner, const std::wstring& path, HICON icon, bool* 
 }
 
 namespace testing {
+HBITMAP CreateIconDragBitmap(HICON icon, int size) { return IconDragBitmap(icon, size); }
+bool InitializeFileReferenceDragImage(IDataObject* data, HICON icon) { return InitializeIconDragImage(data, icon); }
 bool RegisterFileDropWithImageHelper(HWND window,const DropCallbacks& callbacks,IDropTargetHelper* helper){return RegisterDrop(window,callbacks,helper);}
 IDropTarget* AcquireRegisteredFileDropTarget(HWND window) {
     auto* target = static_cast<FileDropTarget*>(GetPropW(window, kTargetProperty));

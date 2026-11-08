@@ -1,4 +1,5 @@
-// Isolated product-renderer previews. No screen capture or personal data.
+// Production card rendering with real Windows Shell icons and isolated samples.
+// No personal desktop, installed-app layout or generated artwork is used.
 #define wWinMain MintDeskApplicationEntry
 #include "../src/main.cpp"
 #undef wWinMain
@@ -6,78 +7,169 @@
 #include <cstdio>
 
 namespace {
-HFONT DemoFont(int size,int weight=FW_NORMAL) {
-    return CreateFontW(-size,0,0,0,weight,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Microsoft YaHei UI");
+struct Samples {
+    std::wstring root;
+    std::vector<std::wstring> files, directories;
+    Samples() {
+        wchar_t temporary[MAX_PATH]{};
+        if (!GetTempPathW(MAX_PATH, temporary)) return;
+        root = std::wstring(temporary) + L"MintDesk-screenshot-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+        if (!CreateDirectoryW(root.c_str(), nullptr)) root.clear();
+    }
+    ~Samples() {
+        for (const auto& path : files) DeleteFileW(path.c_str());
+        for (const auto& path : directories) RemoveDirectoryW(path.c_str());
+        if (!root.empty()) RemoveDirectoryW(root.c_str());
+    }
+    std::wstring File(const wchar_t* name) {
+        if (root.empty()) return {};
+        const auto path = root + L"\\" + name;
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return {};
+        CloseHandle(file); files.push_back(path); return path;
+    }
+    std::wstring Folder(const wchar_t* name) {
+        if (root.empty()) return {};
+        const auto path = root + L"\\" + name;
+        if (!CreateDirectoryW(path.c_str(), nullptr)) return {};
+        directories.push_back(path); return path;
+    }
+    std::wstring Link(const wchar_t* name, const std::wstring& target) {
+        if (root.empty()) return {};
+        const auto path = root + L"\\" + name + L".lnk";
+        IShellLinkW* link = nullptr; IPersistFile* file = nullptr;
+        bool okay = SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+            IID_IShellLinkW, reinterpret_cast<void**>(&link)));
+        if (okay) okay = SUCCEEDED(link->SetPath(target.c_str())) &&
+            SUCCEEDED(link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file))) &&
+            SUCCEEDED(file->Save(path.c_str(), TRUE));
+        if (file) file->Release();
+        if (link) link->Release();
+        if (!okay) return {};
+        files.push_back(path); return path;
+    }
+};
+void Caption(HDC dc, const wchar_t* text, RECT area, int size, COLORREF color, int weight = FW_NORMAL) {
+    const int saved = SaveDC(dc); SetBkMode(dc, TRANSPARENT);
+    HFONT font = CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    Text(dc, text, area, font, color, DT_SINGLELINE | DT_VCENTER);
+    DeleteObject(font); RestoreDC(dc, saved);
 }
-void Caption(HDC dc,const wchar_t* text,RECT area,int size,COLORREF color,int weight=FW_NORMAL) {
-    const int saved=SaveDC(dc);SetBkMode(dc,TRANSPARENT);
-    HFONT font=DemoFont(size,weight);Text(dc,text,area,font,color,DT_SINGLELINE|DT_VCENTER);DeleteObject(font);RestoreDC(dc,saved);
-}
-HICON DemoIcon(int kind,COLORREF color) {
-    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=48;
-    info.bmiHeader.biHeight=-48;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
-    void* pixels=nullptr;HDC dc=CreateCompatibleDC(nullptr);HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
-    if(!dc||!bitmap){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return nullptr;}
-    auto old=SelectObject(dc,bitmap);std::memset(pixels,0,48*48*4);
-    HBRUSH brush=CreateSolidBrush(color);auto previousBrush=SelectObject(dc,brush);auto pen=SelectObject(dc,GetStockObject(NULL_PEN));
-    if(kind==0){RoundRect(dc,4,12,27,24,5,5);RoundRect(dc,4,18,44,39,5,5);}
-    else {RoundRect(dc,10,5,38,43,5,5);for(int y=17;y<=31;y+=7)Fill(dc,{16,y,32,y+2},RGB(28,66,64));}
-    SelectObject(dc,pen);SelectObject(dc,previousBrush);DeleteObject(brush);SelectObject(dc,old);
-    auto* colors=static_cast<DWORD*>(pixels);for(int i=0;i<48*48;++i)if(colors[i]&0xffffff)colors[i]|=0xff000000;
-    BYTE mask[48*6]{};HBITMAP monochrome=CreateBitmap(48,48,1,1,mask);ICONINFO icon{};icon.fIcon=TRUE;icon.hbmColor=bitmap;icon.hbmMask=monochrome;
-    HICON result=CreateIconIndirect(&icon);DeleteObject(monochrome);DeleteObject(bitmap);DeleteDC(dc);return result;
-}
-Card* DemoCard(const wchar_t* title,desk::Layout layout,int width,int height,const std::vector<std::wstring>& labels) {
-    desk::CardState state;state.id=app.nextId++;state.title=title;state.layout=layout;
-    Card* card=CreateCard(std::move(state));if(!card)return nullptr;
-    ShowWindow(card->hwnd,SW_HIDE);card->placing=true;
-    SetWindowPos(card->hwnd,nullptr,0,0,width,height,SWP_NOZORDER|SWP_NOACTIVATE);card->placing=false;card->dpi=96;Fonts(*card);
-    const COLORREF palette[]={RGB(102,221,181),RGB(124,192,234),RGB(242,205,124),RGB(184,166,229)};
-    for(size_t i=0;i<labels.size();++i){card->state.paths.push_back(L"C:\\Demo\\"+labels[i]);card->items.push_back({DemoIcon(i%3==0?0:1,palette[i%4]),labels[i],app.nextToken++});}
+Card* DemoCard(const wchar_t* title, desk::Layout layout, int height,
+              const std::vector<std::wstring>& paths, bool locked = false, bool collapsed = false) {
+    desk::CardState state; state.id = app.nextId++; state.title = title; state.layout = layout;
+    state.locked = locked; state.collapsed = collapsed;
+    Card* card = CreateCard(std::move(state)); if (!card) return nullptr;
+    ShowWindow(card->hwnd, SW_HIDE); card->placing = true;
+    SetWindowPos(card->hwnd, nullptr, 0, 0, 440, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    card->placing = false; card->dpi = 120; Fonts(*card);
+    for (const auto& path : paths) {
+        if (path.empty()) return nullptr;
+        auto visual = desk::LoadShellVisual(path, Dip(*card, layout == desk::Layout::Grid ? 40 : 16));
+        if (!visual.icon) return nullptr;
+        card->state.paths.push_back(path);
+        card->items.push_back({visual.icon, FallbackLabel(path), app.nextToken++});
+    }
     return card;
 }
-void Background(HDC dc,int width,int height,const wchar_t* heading,const wchar_t* subtitle) {
-    for(int y=0;y<height;++y)Fill(dc,{0,y,width,y+1},Blend(RGB(12,35,34),RGB(18,24,34),y*100/std::max(1,height-1)));
-    HPEN p=CreatePen(PS_SOLID,1,RGB(31,65,62));auto old=SelectObject(dc,p);auto brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    Ellipse(dc,width-420,-250,width+380,550);Ellipse(dc,-390,height-310,350,height+430);SelectObject(dc,brush);SelectObject(dc,old);DeleteObject(p);
-    Caption(dc,heading,{80,48,width-70,112},42,RGB(229,245,237),FW_SEMIBOLD);
-    Caption(dc,subtitle,{82,118,width-70,155},18,RGB(153,188,177));
-    Caption(dc,L"MintDesk  /  Windows x64  /  MIT",{82,height-55,width-70,height-20},13,RGB(112,149,142));
+void Background(HDC dc, const wchar_t* heading, const wchar_t* subtitle) {
+    for (int y = 0; y < 1000; ++y)
+        Fill(dc, {0, y, 1440, y + 1}, Blend(RGB(23, 48, 48), RGB(20, 27, 39), y / 10));
+    Caption(dc, heading, {44, 24, 1396, 85}, 37, RGB(234, 245, 240), FW_SEMIBOLD);
+    Caption(dc, subtitle, {46, 89, 1396, 119}, 18, RGB(168, 189, 185));
 }
-bool DrawDemo(HDC dc,Card& card,int x,int y,bool reorder=false) {
-    if(reorder){app.dragSourceId=card.state.id;card.dropHovered=true;card.selected=1;card.draggingOut=true;const RECT slot=ItemRect(card,4);card.dropPoint={slot.left+1,slot.top+1};}
-    desk::AlphaSurface surface;const bool ok=RenderCardSurface(card,surface)&&surface.BlitOver(dc,x,y);app.dragSourceId=0;return ok;
+bool DrawCard(HDC dc, Card& card, int x, int y) {
+    desk::AlphaSurface surface;
+    return RenderCardSurface(card, surface) && surface.BlitOver(dc, x, y);
 }
-bool Save(HBITMAP image,const std::wstring& path) {
-    const CLSID encoder={0x557cf406,0x1a04,0x11d3,{0x9a,0x73,0,0,0xf8,0x1e,0xf3,0x2e}};
-    Gdiplus::Bitmap bitmap(image,nullptr);return bitmap.Save(path.c_str(),&encoder,nullptr)==Gdiplus::Ok;
+void DragIcon(HDC dc, Card& source, size_t index, int x, int y) {
+    desk::AlphaSurface image; const int size = Dip(source, 40);
+    if (!image.Create(size, size)) return;
+    for (HDC matte : {image.BlackDC(), image.WhiteDC()})
+        DrawIconEx(matte, 0, 0, source.items[index].icon, size, size, 0, nullptr, DI_NORMAL);
+    if (image.Compose(RGB(0, 0, 0), 0)) image.BlitOver(dc, x, y);
+    DrawIconEx(dc, x + size / 2, y + size / 2, LoadCursorW(nullptr, IDC_ARROW), 24, 24, 0, nullptr, DI_NORMAL);
+}
+bool SaveImage(HBITMAP image, const std::wstring& path) {
+    const CLSID encoder = {0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0, 0, 0xf8, 0x1e, 0xf3, 0x2e}};
+    Gdiplus::Bitmap bitmap(image, nullptr);
+    return bitmap.Save(path.c_str(), &encoder, nullptr) == Gdiplus::Ok;
 }
 }
-int wmain(int argc,wchar_t** argv) {
-    if(argc!=2)return 1;
-    const HRESULT com=OleInitialize(nullptr);if(FAILED(com))return 1;
-    Gdiplus::GdiplusStartupInput input;ULONG_PTR token=0;if(Gdiplus::GdiplusStartup(&token,&input,nullptr)!=Gdiplus::Ok){OleUninitialize();return 1;}
-    app.preview=true;bool ok=Initialize(GetModuleHandleW(nullptr));
-    if(ok){for(auto& c:app.cards)ShowWindow(c->hwnd,SW_HIDE);StopWorker(app.worker);}
-    Card* grid=ok?DemoCard(L"工作资料",desk::Layout::Grid,370,352,{L"项目笔记.md",L"待办清单.txt",L"演示图片.png",L"参考资料",L"设计草稿.pdf",L"阅读摘录.md"}):nullptr;
-    Card* list=ok?DemoCard(L"日常文件",desk::Layout::List,370,292,{L"今日计划.md",L"会议记录.txt",L"灵感草稿.md",L"资料收集",L"演示图片.png",L"阅读清单.txt",L"临时文档.txt",L"归档资料"}):nullptr;
-    Card* archive=ok?DemoCard(L"归档",desk::Layout::List,370,32,{}):nullptr;
-    if(archive){archive->state.collapsed=true;archive->state.locked=true;SetWindowPos(archive->hwnd,nullptr,0,0,370,32,SWP_NOZORDER|SWP_NOACTIVATE);}
-    constexpr int width=1160,height=700;HDC screen=GetDC(nullptr),canvas=CreateCompatibleDC(screen);HBITMAP image=CreateCompatibleBitmap(screen,width,height);ReleaseDC(nullptr,screen);
-    if(canvas&&image&&grid&&list&&archive){auto old=SelectObject(canvas,image);
-        Background(canvas,width,height,L"MintDesk  薄荷桌面助手",L"极简 · 开源 · 清爽的薄荷绿");
-        ok=DrawDemo(canvas,*grid,150,218)&&DrawDemo(canvas,*list,600,218)&&DrawDemo(canvas,*archive,600,538)&&Save(image,std::wstring(argv[1])+L"\\overview.png");
-        Background(canvas,width,height,L"拖动即可排序",L"列表与网格 · 插入位置提示 · 自动保存顺序");
-        ok=DrawDemo(canvas,*list,150,218,true)&&DrawDemo(canvas,*grid,600,218,true)&&Save(image,std::wstring(argv[1])+L"\\reorder.png")&&ok;
-        SelectObject(canvas,old);
-    }else ok=false;
-    if(image)DeleteObject(image);
-    if(canvas)DeleteDC(canvas);
-    if(app.controller)SendMessageW(app.controller,WM_CLOSE,0,0);
-    if(app.icon)DestroyIcon(app.icon);
-    if(app.singleton)CloseHandle(app.singleton);
-    Gdiplus::GdiplusShutdown(token);OleUninitialize();
-    if(ok)std::puts("Rendered fictional MintDesk previews; no desktop capture or personal configuration was used.");
-    return ok?0:1;
+int wmain(int argc, wchar_t** argv) {
+    if (argc != 2) return 1;
+    const HRESULT com = OleInitialize(nullptr); if (FAILED(com)) return 1;
+    Gdiplus::GdiplusStartupInput input; ULONG_PTR token = 0;
+    if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) { OleUninitialize(); return 1; }
+    Samples samples; app.preview = true;
+    bool okay = !samples.root.empty() && Initialize(GetModuleHandleW(nullptr));
+    if (okay) { for (auto& card : app.cards) ShowWindow(card->hwnd, SW_HIDE); StopWorker(app.worker); }
+    wchar_t windows[MAX_PATH]{}; GetWindowsDirectoryW(windows, MAX_PATH);
+    PWSTR programFiles = nullptr; SHGetKnownFolderPath(FOLDERID_ProgramFilesX86, 0, nullptr, &programFiles);
+    const auto edge = std::wstring(programFiles ? programFiles : L"C:\\Program Files (x86)") +
+        L"\\Microsoft\\Edge\\Application\\msedge.exe";
+    if (programFiles) CoTaskMemFree(programFiles);
+    const auto document = samples.File(L"项目方案.docx"), sheet = samples.File(L"预算清单.xlsx");
+    const auto slides = samples.File(L"产品汇报.pptx"), pdf = samples.File(L"交付说明.pdf");
+    const auto notes = samples.File(L"阅读笔记.md"), todo = samples.File(L"待办清单.txt");
+    const auto project = samples.Folder(L"项目资料"), assets = samples.Folder(L"素材库");
+    const auto previous = samples.Folder(L"历史版本"), source = samples.Folder(L"源代码");
+    const auto archiveFile = samples.File(L"项目归档.zip");
+    Card* documents = okay ? DemoCard(L"工作文档", desk::Layout::Grid, 315,
+        {document, sheet, slides, pdf, notes, todo}) : nullptr;
+    Card* applications = okay ? DemoCard(L"常用应用", desk::Layout::Grid, 315,
+        {samples.Link(L"文件资源管理器", std::wstring(windows) + L"\\explorer.exe"),
+         samples.Link(L"记事本", std::wstring(windows) + L"\\System32\\notepad.exe"), samples.Link(L"Microsoft Edge", edge),
+         samples.Link(L"计算器", std::wstring(windows) + L"\\System32\\calc.exe"),
+         samples.Link(L"画图", std::wstring(windows) + L"\\System32\\mspaint.exe"),
+         samples.Link(L"控制面板", std::wstring(windows) + L"\\System32\\control.exe")}) : nullptr;
+    Card* projects = okay ? DemoCard(L"项目与目录", desk::Layout::List, 315,
+        {project, assets, previous, source, document, sheet, slides, archiveFile}) : nullptr;
+    Card* media = okay ? DemoCard(L"设计素材", desk::Layout::Grid, 315,
+        {samples.File(L"首页草图.png"), samples.File(L"产品照片.jpg"), samples.File(L"横幅设计.svg"),
+         samples.File(L"演示视频.mp4"), samples.File(L"示例动画.gif"), assets}) : nullptr;
+    Card* reading = okay ? DemoCard(L"待办与阅读", desk::Layout::List, 315,
+        {todo, samples.File(L"会议纪要.docx"), samples.File(L"迭代计划.xlsx"), pdf, notes,
+         samples.File(L"需求清单.docx"), samples.File(L"参考资料.pdf"), samples.File(L"发布检查.txt"),
+         samples.File(L"开发说明.md"), samples.File(L"版本记录.txt")}) : nullptr;
+    Card* pinned = okay ? DemoCard(L"常用资料 · 已锁定", desk::Layout::Grid, 315,
+        {project, samples.Folder(L"学习资料"), archiveFile, pdf, samples.File(L"常用表格.xlsx"), source}, true) : nullptr;
+    Card* collapsed = okay ? DemoCard(L"历史归档 · 已收起", desk::Layout::List, 40,
+        {previous, archiveFile, samples.File(L"上一版汇报.pptx")}, true, true) : nullptr;
+    HDC screen = GetDC(nullptr), canvas = CreateCompatibleDC(screen);
+    HBITMAP image = CreateCompatibleBitmap(screen, 1440, 1000); ReleaseDC(nullptr, screen);
+    if (canvas && image && documents && applications && projects && media && reading && pinned && collapsed) {
+        auto old = SelectObject(canvas, image);
+        auto scene = [&]() { return DrawCard(canvas, *documents, 44, 145) && DrawCard(canvas, *applications, 500, 145) &&
+            DrawCard(canvas, *projects, 956, 145) && DrawCard(canvas, *media, 44, 476) && DrawCard(canvas, *reading, 500, 476) &&
+            DrawCard(canvas, *pinned, 956, 476) && DrawCard(canvas, *collapsed, 44, 807); };
+        Background(canvas, L"薄荷桌面助手  /  MintDesk", L"真实 Windows 图标 · 文档、应用与文件夹，一眼找到 · 原生界面示例");
+        okay = scene();
+        Caption(canvas, L"网格 / 列表切换   ·   锁定位置   ·   收起展开   ·   自由缩放", {506, 806, 1396, 849}, 18, kText);
+        Caption(canvas, L"拖入整理  ·  拖动排序  ·  跨卡片移动 / Ctrl 复制  ·  双击打开 / 右键定位", {46, 879, 1396, 909}, 18, kText);
+        Caption(canvas, L"边缘吸附与对齐线  ·  多屏适配  ·  自动保存布局  ·  桌面原项隐藏 / 退出恢复", {46, 917, 1396, 947}, 17, kMuted);
+        Caption(canvas, L"开机启动  /  桌面右键  /  背景透明度可选     ·     v0.9.1  Windows x64  ·  MIT", {46, 954, 1396, 980}, 16, kMuted);
+        okay = SaveImage(image, std::wstring(argv[1]) + L"\\overview.png") && okay;
+        Background(canvas, L"拖动即可整理 · 入口与原文件分开管理", L"拖动时显示真实图标，插入线提示排序位置；跨卡片移动，按住 Ctrl 保留源入口。");
+        documents->selected = 2; documents->draggingOut = true; documents->dropHovered = true;
+        app.dragSourceId = documents->state.id;
+        const RECT slot = ItemRect(*documents, 4); documents->dropPoint = {slot.left + 2, slot.top + 2}; projects->dropHovered = true;
+        okay = scene() && okay;
+        DragIcon(canvas, *documents, 2, 44 + slot.left + 36, 145 + slot.top + 28); app.dragSourceId = 0;
+        Caption(canvas, L"卡片内：插入线标记新位置        跨卡片：目标卡片高亮        Ctrl：复制入口", {46, 873, 1396, 912}, 19, kText);
+        Caption(canvas, L"删除入口不删除文件  ·  软件卸载后自动清理失效引用  ·  网络与移动磁盘不可用时保留入口", {46, 920, 1396, 951}, 17, kMuted);
+        Caption(canvas, L"画面使用实际程序渲染与本机 Shell 图标；文件名和目录均为独立示例。", {46, 961, 1396, 985}, 15, kMuted);
+        okay = SaveImage(image, std::wstring(argv[1]) + L"\\reorder.png") && okay;
+        SelectObject(canvas, old);
+    } else okay = false;
+    if (image) DeleteObject(image);
+    if (canvas) DeleteDC(canvas);
+    if (app.controller) SendMessageW(app.controller, WM_CLOSE, 0, 0);
+    if (app.icon) DestroyIcon(app.icon);
+    if (app.singleton) CloseHandle(app.singleton);
+    Gdiplus::GdiplusShutdown(token); OleUninitialize();
+    if (okay) std::puts("Rendered compact native cards using real Windows icons and isolated sample files.");
+    return okay ? 0 : 1;
 }

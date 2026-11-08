@@ -50,7 +50,7 @@ try {
         @{ Name = 'desktop_items_tests'; Sources = @('tests\desktop_items_tests.cpp', 'src\desktop_items.cpp', 'src\hidden_items.cpp', 'src\state.cpp', 'src\file_helper.cpp'); Extra = @() },
         @{ Name = 'hidden_items_tests'; Sources = @('tests\hidden_items_tests.cpp', 'src\hidden_items.cpp', 'src\state.cpp', 'src\file_helper.cpp'); Extra = @() },
         @{ Name = 'file_helper_tests'; Sources = @('tests\file_helper_tests.cpp', 'src\file_helper.cpp', 'src\state.cpp'); Extra = @() },
-        @{ Name = 'dragdrop_tests'; Sources = @('tests\dragdrop_tests.cpp', 'src\dragdrop.cpp', 'src\shell_items.cpp'); Extra = @() },
+        @{ Name = 'dragdrop_tests'; Sources = @('tests\dragdrop_tests.cpp', 'src\dragdrop.cpp', 'src\shell_items.cpp', 'src\alpha_surface.cpp'); Extra = @() },
         @{ Name = 'ui_tests'; Sources = @('tests\ui_tests.cpp', 'src\state.cpp', 'src\shell_items.cpp', 'src\snap.cpp', 'src\desktop_menu.cpp', 'src\startup_integration.cpp', 'src\install_support.cpp', 'src\dragdrop.cpp', 'src\alpha_surface.cpp', 'src\desktop_items.cpp', 'src\hidden_items.cpp', 'src\glass_backdrop.cpp', 'src\file_helper.cpp'); Extra = @('-municode') }
     )
     foreach ($case in $cases) {

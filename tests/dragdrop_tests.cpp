@@ -164,6 +164,54 @@ HWND Window() {
     return CreateWindowExW(0, L"STATIC", L"MintDesk isolated OLE test",
         WS_POPUP, 0, 0, 20, 20, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
 }
+void TestSourceImage(const std::wstring& fixture) {
+    constexpr int size=16;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=size;info.bmiHeader.biHeight=-size;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+    void* pixels=nullptr;
+    HBITMAP color=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+    BYTE maskBits[size*2]{};
+    maskBits[0]=0xff;maskBits[1]=0xff;
+    HBITMAP mask=CreateBitmap(size,size,1,1,maskBits);
+    Check(color&&pixels&&mask,"create legacy mask-based icon fixture");
+    HICON legacy=nullptr;
+    if(color&&pixels&&mask) {
+        // Older shortcuts often have useful RGB but an entirely zero alpha
+        // channel. Their mask still needs to produce a visible drag image.
+        for(int i=0;i<size*size;++i)static_cast<DWORD*>(pixels)[i]=i<size?0:0x00008040;
+        ICONINFO iconInfo{};iconInfo.fIcon=TRUE;iconInfo.hbmColor=color;iconInfo.hbmMask=mask;
+        legacy=CreateIconIndirect(&iconInfo);
+        HBITMAP drag=desk::testing::CreateIconDragBitmap(legacy,size);
+        DIBSECTION section{};
+        Check(drag&&GetObjectW(drag,sizeof(section),&section)==sizeof(section)&&section.dsBm.bmBits,
+            "drag image exposes a 32-bit DIB");
+        if(section.dsBm.bmBits) {
+            const auto* actual=static_cast<const DWORD*>(section.dsBm.bmBits);
+            Check((actual[size*8+8]>>24)==255,"zero-alpha shell icon stays visible in drag feedback");
+            Check((actual[0]>>24)==0,"legacy transparent mask remains transparent");
+        }
+        if(drag)DeleteObject(drag);
+    }
+    if(color)DeleteObject(color);
+    if(mask)DeleteObject(mask);
+    for(HICON icon:{legacy,static_cast<HICON>(nullptr)}) {
+        IDataObject* data=desk::testing::CreateFileReferenceDataObject(fixture);
+        Check(data&&desk::testing::InitializeFileReferenceDragImage(data,icon),
+            "real Shell source helper accepts icon and not-yet-loaded fallback");
+        if(data) {
+            FORMATETC format{static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"DragImageBits")),
+                nullptr,DVASPECT_CONTENT,-1,TYMED_HGLOBAL};
+            STGMEDIUM image{};
+            Check(data->GetData(&format,&image)==S_OK&&image.hGlobal,
+                "real Shell helper stores readable drag-image data after initialization");
+            ReleaseStgMedium(&image);
+            data->Release();
+        }
+    }
+    if(legacy)DestroyIcon(legacy);
+}
 void TestImageLifecycle(const std::wstring& fixture) {
     HWND window=Window();Callbacks context;context.window=window;
     auto* image=new ImageHelper;context.imageHidden=&image->hidden;
@@ -373,6 +421,27 @@ void TestOutbound(const std::wstring& fixture) {
     format = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
     Check(data->SetData(&format, &image, FALSE) == E_ACCESSDENIED,
         "target cannot replace the exported source reference");
+    FORMATETC contextFormat{static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"MintDesk-Test-DragContext")),
+        nullptr,DVASPECT_CONTENT,-1,TYMED_ISTREAM};
+    STGMEDIUM context{};context.tymed=TYMED_ISTREAM;
+    Check(CreateStreamOnHGlobal(nullptr,TRUE,&context.pstm)==S_OK,"create native private drag-context stream");
+    const DWORD sentinel=0x1234abcd;ULONG written=0;
+    if(context.pstm) {
+        context.pstm->Write(&sentinel,sizeof(sentinel),&written);
+        Check(data->SetData(&contextFormat,&context,FALSE)==S_OK,"private stream can retain independent COM ownership");
+        ReleaseStgMedium(&context);
+        STGMEDIUM fetched{};
+        Check(data->GetData(&contextFormat,&fetched)==S_OK&&fetched.tymed==TYMED_ISTREAM,
+            "private drag-context stream is readable after caller release");
+        if(fetched.pstm) {
+            LARGE_INTEGER beginning{};fetched.pstm->Seek(beginning,STREAM_SEEK_SET,nullptr);
+            DWORD actual=0;ULONG read=0;fetched.pstm->Read(&actual,sizeof(actual),&read);
+            Check(read==sizeof(actual)&&actual==sentinel,"private stream data survives shell handoff");
+        }
+        Check(data->SetData(&contextFormat,&fetched,TRUE)==S_OK,"private stream ownership can transfer back to the object");
+        contextFormat.tymed=TYMED_HGLOBAL;
+        Check(data->QueryGetData(&contextFormat)==DV_E_TYMED,"private stream cannot be requested as global memory");
+    }
     data->Release();
     Check(!desk::testing::CreateFileReferenceDataObject(L"https://example.invalid"),
         "outbound URL commands are rejected");
@@ -510,6 +579,7 @@ int main() {
         WriteFile(file, sentinel, sizeof(sentinel), &written, nullptr);
         CloseHandle(file);
         TestTarget(fixture);
+        TestSourceImage(fixture);
         TestImageLifecycle(fixture);
         TestReentrantRevoke(fixture);
         TestOutbound(fixture);

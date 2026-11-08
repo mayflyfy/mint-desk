@@ -1,6 +1,7 @@
 #include "../src/shell_items.h"
 
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -63,9 +64,47 @@ void CheckDrop() {
     DragFinish(drop);
     Check(desk::PathsFromDrop(nullptr).empty(), "empty file drop");
 }
+
+bool SaveLink(const std::wstring& path,const std::wstring& target) {
+    IShellLinkW* link=nullptr;IPersistFile* file=nullptr;
+    bool okay=SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,
+        IID_IShellLinkW,reinterpret_cast<void**>(&link)));
+    if(okay)okay=SUCCEEDED(link->SetPath(target.c_str()))&&
+        SUCCEEDED(link->QueryInterface(IID_IPersistFile,reinterpret_cast<void**>(&file)))&&
+        SUCCEEDED(file->Save(path.c_str(),TRUE));
+    if(file)file->Release();
+    if(link)link->Release();
+    return okay;
+}
+void CheckAvailability() {
+    wchar_t temp[MAX_PATH]{};GetTempPathW(MAX_PATH,temp);
+    const auto directory=std::wstring(temp)+L"MintDesk-shell-"+std::to_wstring(GetCurrentProcessId());
+    Check(CreateDirectoryW(directory.c_str(),nullptr)!=FALSE,"create availability fixtures");
+    const auto target=directory+L"\\fictional-app.exe",shortcut=directory+L"\\application.lnk";
+    HANDLE file=CreateFileW(target.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Check(file!=INVALID_HANDLE_VALUE,"create fictional uninstall target");
+    if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
+    Check(SaveLink(shortcut,target),"create real local shortcut without launching it");
+    auto status=desk::InspectShellItem(shortcut);
+    Check(!status.missing&&!status.watchDirectories.empty(),"existing shortcut watches local changes");
+    Check(!desk::InspectShellItem(directory).missing,"existing folder retained");
+    Check(DeleteFileW(target.c_str())!=FALSE,"simulate software uninstallation");
+    Check(desk::InspectShellItem(shortcut).missing,"shortcut to uninstalled local software is stale");
+    Check(GetFileAttributesW(shortcut.c_str())!=INVALID_FILE_ATTRIBUTES,"inspection preserves the original shortcut");
+    Check(desk::InspectShellItem(target).missing,"deleted local reference is stale");
+    Check(SaveLink(shortcut,L"\\\\mintdesk-never-connect.invalid\\share\\app.exe"),"create offline shortcut fixture");
+    Check(!desk::InspectShellItem(shortcut).missing,"offline shortcut target retained without network access");
+    DeleteFileW(shortcut.c_str());
+    Check(desk::InspectShellItem(shortcut).missing,"deleted shortcut itself is stale");
+    Check(!desk::InspectShellItem(L"\\\\mintdesk-never-connect.invalid\\share\\app.exe").missing,
+        "remote reference is never mistaken for an uninstalled app");
+    Check(!desk::InspectShellItem(L"relative.txt").missing,"invalid path is not evidence of deletion");
+    RemoveDirectoryW(directory.c_str());
+}
 } // namespace
 
 int main() {
+    const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     using desk::IsSupportedPath;
     Check(IsSupportedPath(L"C:\\Windows\\explorer.exe"), "absolute drive path");
     Check(IsSupportedPath(L"D:/folder/file.lnk"), "forward slash drive path");
@@ -83,6 +122,7 @@ int main() {
     Check(!IsSupportedPath(L"\\\\server"), "reject missing UNC share");
     Check(!IsSupportedPath(L"\\\\server\\"), "reject empty UNC share");
     CheckDrop();
+    CheckAvailability();
 
     // None of these checks launches an item, opens UI, creates a file, or asks
     // the network server to resolve a file. UNC visuals only use generic icons.
@@ -112,5 +152,6 @@ int main() {
     Check(!invalid.icon, "invalid reference never invokes shell icon lookup");
 
     if (!failures) std::puts("Shell item tests passed.");
+    if(SUCCEEDED(com))CoUninitialize();
     return failures ? 1 : 0;
 }

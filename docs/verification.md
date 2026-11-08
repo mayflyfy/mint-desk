@@ -1,6 +1,6 @@
 # Verification
 
-Current version: v0.9.0, Windows x64. Results describe tested environments, not every machine.
+Current version: v0.9.1, Windows x64. Results describe tested environments, not every machine.
 
 ## Automated checks
 
@@ -9,7 +9,7 @@ Current version: v0.9.0, Windows x64. Results describe tested environments, not 
 | Suite | Coverage |
 | --- | --- |
 | state | CRC, backup recovery, Unicode, layouts, monitor geometry |
-| shell | Path validation, icon ownership, missing files |
+| shell | Path validation, icon ownership, missing local files and shortcut targets, preservation of remote references |
 | snap | Screen/card alignment, cumulative one-pixel drag/resize escape, guide geometry, negative coordinates, DPI |
 | desktop_menu | Isolated registry registration, quoting, one dynamic action |
 | startup_integration | First-run defaults, installer choices, persistent opt-outs, reserved update preference, partial retry, enabled-entry path refresh; isolated native shortcut creation, identity/visibility preservation, collision and ownership protection |
@@ -18,7 +18,7 @@ Current version: v0.9.0, Windows x64. Results describe tested environments, not 
 | desktop_items | Legacy recovery, collision handling, durable intent |
 | hidden_items | In-place visibility, occupied folders, identity, attribute restoration, corrupt/write-failed journals, watcher recovery |
 | file_helper | Narrow path/identity boundaries, no replacement, limited attribute changes |
-| dragdrop | OLE ownership, cancellation, drag-image cleanup, external-drop preparation |
+| dragdrop | OLE ownership, cancellation, real Shell drag-image initialization, private IStream handoff, legacy icon alpha/masks, drag-image cleanup, external-drop preparation |
 | ui | Desktop-host fallback, bypassed topmost requests, foreground-independent reorder repair, multi-card/glass ordering, coalesced repair quiescence; selection, layouts, guides, keyboard movement, editing, collapse, menus, transfer |
 
 Tests do not require real user files or installed third-party apps. Geometry and compositor checks depend on the Windows desktop session.
@@ -27,6 +27,9 @@ Tests do not require real user files or installed third-party apps. Geometry and
 
 ## Local observations
 
+- The v0.9.1 isolated installer lifecycle suite passed fresh installation, upgrades, saved opt-outs, portable migration, blocked restoration, and uninstall preservation. Chinese fixture names are now read correctly by Windows PowerShell as well as PowerShell 7.
+- Updated screenshots contain seven compact native cards, real Windows Shell document/application/folder icons, grid and list views, locked and collapsed cards, and drag feedback. All named files and directories are isolated examples; no personal desktop image or layout was published.
+- v0.9.1 passed all twelve native suites. Isolated UI fixtures deleted a fictional program and shortcut using native filesystem operations, verified automatic removal from multiple cards, retained surviving item identity/selection, and reloaded the cleaned saved layout. Checks defer during modal loops and the notification timer returns to idle. Real Shell source-helper initialization passes for both a mask-based icon and the not-yet-loaded fallback. No installed third-party application or personal layout was modified. The release executable is 439,808 bytes; the installer is 2,223,956 bytes.
 - All twelve native suites and the isolated installer lifecycle checks passed for v0.9.0, using Windows x64 and MinGW-w64 GCC 10.3. Native WM_MOVING regression tests feed consecutive one-pixel pointer positions and incremental window proposals; they do not inject system mouse input.
 - Layer tests use isolated native windows to request topmost status with WINDOWPOSCHANGING bypassed, reorder an ordinary window without changing foreground, promote a blur surface separately, and verify all cards return below the ordinary window. Missing/transient desktop anchors fall to HWND_BOTTOM; Explorer icon-view creation schedules repair. Queued repairs settle instead of continuously repositioning the same windows.
 - Renaming retains the old recovery directory when present, without moving/copying its journals. New installations use the MintDesk data directory. Cross-version singleton and mutation mutex identities remain compatible.

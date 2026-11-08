@@ -34,7 +34,7 @@ Building the installer requires Inno Setup 7.1+ on the development machine only.
 
 Run `tests/installer_tests.ps1 -Iscc C:\path\to\ISCC.exe` for installation, upgrades, opt-outs, restoration failure, and uninstall checks. These use a test-only payload, a dedicated registry key, and temporary links/data; they never install over the user's actual application. The native integration and maintenance suites test the production code independently.
 
-Screenshots use the production renderer with fictional items. The portable ZIP contains only the EXE, license, and usage note; the installer contains the app and license. Stage current source before auditing; never include personal layouts, recovery journals, development backups, or build outputs in Git.
+Screenshots use the production renderer, real Windows Shell icons, and isolated sample files and directories. The portable ZIP contains only the EXE, license, and usage note; the installer contains the app and license. Stage current source before auditing; never include personal layouts, recovery journals, development backups, or build outputs in Git.
 
 ## Contribution rules
 

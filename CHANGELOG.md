@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 — 2026-11-08
+
+- Restore the icon that follows card-to-card drags by accepting the Shell helper's private stream context as well as its image bits.
+- Preserve bitmap ownership and transparent masks, and provide a drag icon while the item's icon is still loading.
+- Remove stale card references after local files, shortcuts, or shortcut targets disappear, using filesystem notifications and background inspection.
+- Save cleaned layouts, retain unavailable remote/removable references, and defer cleanup while a drag or menu is active.
+
 ## 0.9.0 — 2026-11-01
 
 - Add a per-user EXE installer with directory selection, optional desktop shortcut and autostart, and a disabled-by-default reserved automatic-update preference.

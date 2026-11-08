@@ -35,6 +35,9 @@ DWORD DragFileReference(HWND owner, const std::wstring& path, HICON icon = nullp
                         bool (*beforeExternalDrop)(void*) = nullptr,void* externalContext = nullptr);
 
 namespace testing {
+// Returned bitmap is caller-owned, with straight alpha suitable for the Shell.
+HBITMAP CreateIconDragBitmap(HICON icon, int size);
+bool InitializeFileReferenceDragImage(IDataObject* data, HICON icon);
 // Each non-null return owns one reference, to be released by the caller.
 IDropTarget* AcquireRegisteredFileDropTarget(HWND window);
 bool RegisterFileDropWithImageHelper(HWND window,const DropCallbacks& callbacks,IDropTargetHelper* helper);
